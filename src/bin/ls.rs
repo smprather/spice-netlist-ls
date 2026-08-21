@@ -33,15 +33,64 @@ fn main() -> anyhow::Result<()> {
                 handle_request(&connection, req)?;
             }
             Message::Response(_) => {}
-            Message::Notification(notif) => {
-                if notif.method == "textDocument/didChange" || notif.method == "textDocument/didOpen" {
-                    // diagnostics stub — parse and push
+            Message::Notification(notif) => match notif.method.as_str() {
+                "textDocument/didOpen" => {
+                    let params: DidOpenTextDocumentParams = serde_json::from_value(notif.params)?;
+                    publish_diagnostics(
+                        &connection,
+                        &params.text_document.uri,
+                        &params.text_document.text,
+                    )?;
                 }
-            }
+                "textDocument/didChange" => {
+                    let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
+                    // full sync — the last content change carries the whole document
+                    if let Some(text) = params.content_changes.last().map(|c| c.text.clone()) {
+                        publish_diagnostics(&connection, &params.text_document.uri, &text)?;
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
+    // The writer thread owns a receiver on connection's channel; if `connection`
+    // is still alive here the writer never sees channel-close and join() hangs.
+    drop(connection);
     io_threads.join()?;
+    Ok(())
+}
+
+fn publish_diagnostics(connection: &Connection, uri: &Uri, text: &str) -> anyhow::Result<()> {
+    let dialect = spice_netlist_ls::get_dialect(spice_netlist_ls::detect_dialect(text));
+    let path = PathBuf::from(uri.path().as_str());
+    let external = spice_netlist_ls::linter::external_subckts(&path, &dialect);
+    let opts = spice_netlist_ls::linter::LintOptions { external_subckts: external };
+    let diags = spice_netlist_ls::linter::lint_str(text, &dialect, &opts)
+        .into_iter()
+        .map(|d| Diagnostic {
+            range: Range {
+                start: Position { line: d.range.start_line, character: d.range.start_col },
+                end: Position { line: d.range.end_line, character: d.range.end_col },
+            },
+            severity: Some(match d.severity {
+                spice_netlist_ls::linter::Severity::Error => DiagnosticSeverity::ERROR,
+                spice_netlist_ls::linter::Severity::Warning => DiagnosticSeverity::WARNING,
+            }),
+            code: Some(NumberOrString::String(d.code.to_string())),
+            source: Some("spice-netlist-ls".to_string()),
+            message: d.message,
+            ..Default::default()
+        })
+        .collect();
+    connection.sender.send(Message::Notification(lsp_server::Notification {
+        method: "textDocument/publishDiagnostics".to_string(),
+        params: serde_json::to_value(PublishDiagnosticsParams {
+            uri: uri.clone(),
+            diagnostics: diags,
+            version: None,
+        })?,
+    }))?;
     Ok(())
 }
 

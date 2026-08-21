@@ -2,6 +2,8 @@
 
 Highly opinionated `gofmt` for SPICE. HSPICE is golden reference (dialect trait pluggable for NGSPICE/Spectre/LTSpice without re-arch).
 
+> Naming: the formatter is **`spicefmt`** (gofmt/rustfmt/shfmt convention). The language server binary is `spice-netlist-ls`. The SPICE *netlist* format predates the SPICE-*the-language* ecosystem — we claim `spicefmt`.
+
 > First draft: formatter + LSP stub in Rust. `spice-lsp` (Python, `spice-lang` .spc) is a different language — we target true SPICE netlists.
 
 ## Why
@@ -48,9 +50,8 @@ Add a dialect: implement `Dialect`, register in `dialect_from_str`, no parser re
 - [x] HSPICE formatter (idempotent, generic params)
 - [x] LSP formatting stub
 - [x] LSP go-to-definition: `X` instantiation → `.subckt` (follows `.include`/`.inc`/`.lib` transitively)
-- [ ] Tree-sitter grammar generated from IR spec
-- [ ] Linter (floating nodes, arity, undefined subckt/model)
-- [ ] `spice fmt` Python wrapper calling rust binary
+- [x] Linter (undefined subckt, arity, floating nodes, duplicate instances, unterminated subckt) — LSP diagnostics + `spicefmt --lint`
+- [ ] PyPI wrapper package exposing `spicefmt` (must not collide with the Rust binary's entry point)
 
 ## Test
 

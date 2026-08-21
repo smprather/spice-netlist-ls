@@ -7,9 +7,6 @@ authors = [{ name = "Myles Prather", email = "smprather@gmail.com" }]
 requires-python = ">=3.14"
 dependencies = []
 
-[project.scripts]
-spice-netlist-ls = "spice_netlist_ls:main"
-
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"

@@ -74,7 +74,9 @@ fn join_continuations(input: &str, dialect: &dyn Dialect) -> Vec<String> {
 
 /// Logical lines as `(start_line, end_line_inclusive, text)` spans, 0-based
 /// physical line numbers. Continuation lines merge into the preceding
-/// statement and extend its span.
+/// statement and extend its span. Blank lines are transparent, but a comment
+/// severs attachment: commenting out a statement must not silently re-attach
+/// its continuations to an unrelated element above (data corruption).
 pub fn logical_line_spans(input: &str, dialect: &dyn Dialect) -> Vec<(usize, usize, String)> {
     let mut out: Vec<(usize, usize, String)> = Vec::new();
     let cont = dialect.continuation_char();
@@ -85,8 +87,11 @@ pub fn logical_line_spans(input: &str, dialect: &dyn Dialect) -> Vec<(usize, usi
             let mut attached = false;
             for idx in (0..out.len()).rev() {
                 let candidate = out[idx].2.trim();
-                if candidate.is_empty() || dialect.is_comment_line(candidate) {
+                if candidate.is_empty() {
                     continue;
+                }
+                if dialect.is_comment_line(candidate) {
+                    break;
                 }
                 if !rest.is_empty() {
                     out[idx].2.push(' ');
@@ -155,7 +160,7 @@ pub fn include_paths(input: &str, dialect: &dyn Dialect) -> Vec<String> {
     out
 }
 
-fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
+pub fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Stmt::Blank;
@@ -671,5 +676,29 @@ X1 a b inv\n\
     fn ignores_directive_lookalikes() {
         let input = ".include2 x\n.incident y\n";
         assert!(include_paths(input, hspice().as_ref()).is_empty());
+    }
+
+    #[test]
+    fn comment_severs_continuation_attachment() {
+        let input = "Rload out gnd 10k\n* Xinv in out inv\n+ w=2u\n";
+        let spans = logical_line_spans(input, hspice().as_ref());
+        // Rload unchanged; the + line is orphaned, NOT merged into Rload
+        assert_eq!(spans[0].2, "Rload out gnd 10k");
+        assert_eq!(spans[2].2, "+ w=2u");
+    }
+
+    #[test]
+    fn blank_lines_do_not_sever_continuation() {
+        let input = "R1 a b 1k\n\n+ tc=1\n";
+        let spans = logical_line_spans(input, hspice().as_ref());
+        assert_eq!(spans[0].2, "R1 a b 1k tc=1");
+    }
+
+    #[test]
+    fn adjacent_continuation_still_attaches() {
+        let input = "M1 a b c d nch w=1u\n+ ad=0.5p\n";
+        let spans = logical_line_spans(input, hspice().as_ref());
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].2.contains("ad=0.5p"));
     }
 }

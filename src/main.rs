@@ -23,6 +23,9 @@ struct Args {
     #[arg(long, help = "Detect and print dialect per input, no formatting")]
     print_dialect: bool,
 
+    #[arg(long, help = "Lint only: print diagnostics, exit 1 on error-severity findings")]
+    lint: bool,
+
     #[arg(long, help = "Print dialect list and exit")]
     list_dialects: bool,
 }
@@ -56,6 +59,10 @@ fn main() {
             println!("stdin: {}", kind.as_str());
             return;
         }
+        if args.lint {
+            let has_error = run_lint("<stdin>", &input, kind, None);
+            std::process::exit(if has_error { 1 } else { 0 });
+        }
         let opts = FormatOptions {
             dialect: kind,
             ..Default::default()
@@ -87,6 +94,12 @@ fn main() {
             println!("{}: {}", path.display(), kind.as_str());
             continue;
         }
+        if args.lint {
+            if run_lint(&path.display().to_string(), &input, kind, Some(path)) {
+                exit_code = 1;
+            }
+            continue;
+        }
         let opts = FormatOptions {
             dialect: kind,
             ..Default::default()
@@ -109,6 +122,32 @@ fn main() {
         }
     }
     std::process::exit(exit_code);
+}
+
+fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>) -> bool {
+    let dialect = spice_netlist_ls::get_dialect(kind);
+    let opts = match path {
+        Some(p) => spice_netlist_ls::linter::LintOptions {
+            external_subckts: spice_netlist_ls::linter::external_subckts(p, &dialect),
+        },
+        None => spice_netlist_ls::linter::LintOptions::default(),
+    };
+    let mut has_error = false;
+    for d in spice_netlist_ls::linter::lint_str(input, &dialect, &opts) {
+        if d.severity == spice_netlist_ls::linter::Severity::Error {
+            has_error = true;
+        }
+        println!(
+            "{}:{}:{}: {} [{}]: {}",
+            name,
+            d.range.start_line + 1,
+            d.range.start_col + 1,
+            d.severity.as_str(),
+            d.code,
+            d.message
+        );
+    }
+    has_error
 }
 
 fn read_stdin() -> String {

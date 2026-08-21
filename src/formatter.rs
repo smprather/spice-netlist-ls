@@ -327,4 +327,16 @@ mod tests {
         assert_eq!(fmt("V1 a 0 DC {vssr}\n"), "V1 a 0 DC {vssr}\n");
         assert_eq!(fmt("V2 a b pulse(0 1 1n)\n"), "V2 a b pulse(0 1 1n)\n");
     }
+
+    #[test]
+    fn commenting_a_line_does_not_steal_its_continuation() {
+        let input = "Rload out gnd 10k\n* Xinv in out inv\n+ w=2u\n";
+        let output = fmt(input);
+        // Rload must not absorb w=2u; the orphan continuation survives verbatim
+        assert!(output.contains("Rload out gnd 10k\n"));
+        assert!(!output.contains("Rload out gnd 10k w"));
+        assert!(output.contains("+ w = 2u"));
+        // idempotent
+        assert_eq!(fmt(&output), output);
+    }
 }

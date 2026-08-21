@@ -2,6 +2,7 @@ pub mod detect;
 pub mod dialect;
 pub mod formatter;
 pub mod ir;
+pub mod linter;
 pub mod parser;
 
 pub use detect::{DialectScores, detect_dialect, score_dialect};
