@@ -1,0 +1,23 @@
+[project]
+name = "spice-netlist-ls"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [{ name = "Myles Prather", email = "smprather@gmail.com" }]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+spice-netlist-ls = "spice_netlist_ls:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+  "pdfplumber>=0.11.10",
+  "pymupdf>=1.28.2",
+  "pypdf>=6.16.1",
+  "pytest>=9.1.1",
+]

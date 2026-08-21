@@ -1,0 +1,149 @@
+use lsp_server::{Connection, Message, Request, RequestId, Response};
+use lsp_types::*;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+
+fn main() -> anyhow::Result<()> {
+    let (connection, io_threads) = Connection::stdio();
+
+    let server_caps = serde_json::to_value(ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let init_params = connection.initialize(server_caps)?;
+    let _params: InitializeParams = serde_json::from_value(init_params)?;
+
+    // nvim logs stderr as ERROR, so only print when explicitly debugging.
+    if std::env::var_os("SPICE_NETLIST_LS_LOG").is_some() {
+        eprintln!("spice-netlist-ls: started (dialect auto-detect, formatter + definition)");
+    }
+
+    for msg in &connection.receiver {
+        match msg {
+            Message::Request(req) => {
+                if connection.handle_shutdown(&req)? {
+                    break;
+                }
+                handle_request(&connection, req)?;
+            }
+            Message::Response(_) => {}
+            Message::Notification(notif) => {
+                if notif.method == "textDocument/didChange" || notif.method == "textDocument/didOpen" {
+                    // diagnostics stub — parse and push
+                }
+            }
+        }
+    }
+
+    io_threads.join()?;
+    Ok(())
+}
+
+fn handle_request(connection: &Connection, req: Request) -> anyhow::Result<()> {
+    match req.method.as_str() {
+        "textDocument/formatting" => {
+            let (id, params): (RequestId, DocumentFormattingParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let uri = params.text_document.uri;
+            let text = std::fs::read_to_string(uri.path().as_str()).unwrap_or_default();
+            let opts = spice_netlist_ls::formatter::FormatOptions {
+                dialect: spice_netlist_ls::detect_dialect(&text),
+                ..Default::default()
+            };
+            let formatted = spice_netlist_ls::format_str(&text, &opts);
+            let edits = if text == formatted {
+                Vec::new()
+            } else {
+                vec![TextEdit {
+                    range: Range {
+                        start: Position { line: 0, character: 0 },
+                        end: Position { line: u32::MAX, character: 0 },
+                    },
+                    new_text: formatted,
+                }]
+            };
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(edits)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/definition" => {
+            let (id, params): (RequestId, GotoDefinitionParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let uri = params.text_document_position_params.text_document.uri;
+            let path = PathBuf::from(uri.path().as_str());
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let dialect = spice_netlist_ls::get_dialect(spice_netlist_ls::detect_dialect(&text));
+            let location = spice_netlist_ls::parser::subckt_ref_at_line(
+                &text,
+                params.text_document_position_params.position.line as usize,
+                dialect.as_ref(),
+            )
+            .and_then(|name| {
+                let mut visited = HashSet::new();
+                find_subckt_def(&path, &text, &name, &dialect, &mut visited)
+            });
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(location)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        _ => {
+            let resp = Response {
+                id: req.id,
+                result: Some(serde_json::Value::Null),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+    }
+    Ok(())
+}
+
+/// Find a subckt definition in `text`, following `.include`/`.inc`/`.lib`
+/// directives transitively (relative paths resolve against the including
+/// file's directory; cycles guarded via `visited`).
+fn find_subckt_def(
+    path: &Path,
+    text: &str,
+    name: &str,
+    dialect: &Arc<dyn spice_netlist_ls::Dialect>,
+    visited: &mut HashSet<PathBuf>,
+) -> Option<Location> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return None;
+    }
+    if let Some((_, line)) = spice_netlist_ls::parser::subckt_definitions(text, dialect.as_ref())
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+    {
+        return Some(Location {
+            uri: Uri::from_str(&format!("file://{}", path.display())).ok()?,
+            range: Range::new(Position::new(*line as u32, 0), Position::new(*line as u32, 0)),
+        });
+    }
+    for inc in spice_netlist_ls::parser::include_paths(text, dialect.as_ref()) {
+        let inc_path = if Path::new(&inc).is_absolute() {
+            PathBuf::from(&inc)
+        } else {
+            path.parent()?.join(&inc)
+        };
+        if let Ok(inc_text) = std::fs::read_to_string(&inc_path) {
+            if let Some(loc) = find_subckt_def(&inc_path, &inc_text, name, dialect, visited) {
+                return Some(loc);
+            }
+        }
+    }
+    None
+}

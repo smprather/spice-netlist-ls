@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# update-nvim: rebuild spice-netlist-ls (spicefmt + spice-netlist-ls) and
+# install into ~/.local/bin, which the nvim config references via PATH.
+set -euo pipefail
+
+repo="$(cd "$(dirname "$(dirname "${BASH_SOURCE[0]}")")" && pwd)"
+
+cd "$repo"
+echo "==> cargo build --release"
+cargo build --release
+
+for bin in spicefmt spice-netlist-ls; do
+    src="target/release/$bin"
+    [[ -f "$src" ]] || { echo "error: $src missing" >&2; exit 1; }
+    dest="$HOME/.local/bin/$bin"
+
+    if cmp -s "$src" "$dest"; then
+        echo "==> $bin already up to date"
+        continue
+    fi
+
+    # Stop a running LSP holding the binary busy (nvim restarts it on next open).
+    # -x misses >15-char names (kernel comm truncation), so match full cmdline.
+    if pgrep -f "^$bin\$" >/dev/null 2>&1; then
+        echo "==> stopping running $bin"
+        pkill -f "^$bin\$" || true
+        sleep 0.5
+    fi
+
+    echo "==> installing $bin"
+    cp "$src" "$dest"
+done
+
+echo "==> done"
