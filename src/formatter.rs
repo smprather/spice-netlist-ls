@@ -63,23 +63,25 @@ fn format_stmt(
             push_line(out, &line, opts, dialect, depth, first, prev_was_blank);
         }
         Stmt::Directive(d) => {
-            let line = format_directive(d);
+            let line = format_directive(d, dialect);
             push_line_wrapped(out, &line, d.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
         }
         Stmt::Instance(inst) => {
-            let line = format_instance(inst);
+            let line = format_instance(inst, dialect);
             push_line_wrapped(out, &line, inst.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
         }
         Stmt::Subckt(s) => {
             if !*first && !*prev_was_blank {
                 out.push('\n');
             }
-            let header = format_subckt_header(s);
+            let header = format_subckt_header(s, dialect);
             push_line_wrapped(out, &header, s.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
             for inner in &s.body {
                 format_stmt(inner, out, opts, dialect, depth + 1, first, prev_was_blank);
             }
-            let ends = if s.name.is_empty() {
+            let ends = if let Some(e) = &s.ends_name {
+                format!(".ends {e}")
+            } else if s.name.is_empty() {
                 ".ends".to_string()
             } else {
                 format!(".ends {}", s.name)
@@ -126,15 +128,41 @@ fn push_line_wrapped(
     if line.is_empty() {
         return;
     }
-    let full = if let Some(c) = inline_comment {
-        format!("{line} {c}")
-    } else {
-        line.to_string()
-    };
 
-    let wrapped = wrap_line(&full, opts.max_width, dialect.continuation_indent());
-    out.push_str(&wrapped);
-    if !wrapped.ends_with('\n') {
+    // Keep the inline comment on its own final line when it would otherwise
+    // overflow: a `+` continuation of `$ ...`/`; ...` is not itself a comment
+    // in SPICE, so carrying comment text across would turn it back into code.
+    let (body, comment) = match inline_comment {
+        Some(c) => (line.to_string(), Some(c.to_string())),
+        None => (line.to_string(), None),
+    };
+    let wrapped = wrap_line(&body, opts.max_width, dialect.continuation_indent());
+    let wrapped_len = wrapped.rsplit('\n').next().map(str::len).unwrap_or(0);
+    let full = match comment {
+        Some(c) => {
+            if wrapped.contains('\n') {
+                format!("{wrapped}\n{}{}", dialect.continuation_indent(), c)
+            } else if wrapped_len + 1 + c.len() > opts.max_width {
+                // Body fits but the comment would push past the margin —
+                // give the comment its own continuation line, prefixed with
+                // the dialect's inline-comment delimiter so it stays a
+                // comment on the continuation.
+                let delim = dialect
+                    .inline_comment_delim()
+                    .map(|c| if c == '/' { "//".to_string() } else { c.to_string() })
+                    .unwrap_or_else(|| "$".to_string());
+                let text = c
+                    .trim_start_matches(|ch: char| ch == '$' || ch == ';' || ch == '/' || ch.is_whitespace())
+                    .trim_start();
+                format!("{wrapped}\n{}{delim} {text}", dialect.continuation_indent())
+            } else {
+                format!("{wrapped} {c}")
+            }
+        }
+        None => wrapped,
+    };
+    out.push_str(&full);
+    if !full.ends_with('\n') {
         out.push('\n');
     }
     *first = false;
@@ -205,7 +233,7 @@ fn tokenize_for_wrap(line: &str) -> Vec<String> {
     out
 }
 
-fn format_directive(d: &Directive) -> String {
+fn format_directive(d: &Directive, dialect: &dyn Dialect) -> String {
     let mut s = format!(".{}", d.name.to_ascii_lowercase());
     for a in &d.args {
         s.push(' ');
@@ -213,12 +241,12 @@ fn format_directive(d: &Directive) -> String {
     }
     for p in normalize_params(&d.params, false) {
         s.push(' ');
-        s.push_str(&format_param(&p));
+        s.push_str(&format_param(&p, dialect));
     }
     s
 }
 
-fn format_instance(inst: &Instance) -> String {
+fn format_instance(inst: &Instance, dialect: &dyn Dialect) -> String {
     let mut s = inst.name.clone();
     for n in &inst.nodes {
         s.push(' ');
@@ -230,12 +258,12 @@ fn format_instance(inst: &Instance) -> String {
     }
     for p in normalize_params(&inst.params, false) {
         s.push(' ');
-        s.push_str(&format_param(&p));
+        s.push_str(&format_param(&p, dialect));
     }
     s
 }
 
-fn format_subckt_header(s: &Subckt) -> String {
+fn format_subckt_header(s: &Subckt, dialect: &dyn Dialect) -> String {
     let mut out = format!(".subckt {}", s.name);
     for p in &s.ports {
         out.push(' ');
@@ -243,19 +271,19 @@ fn format_subckt_header(s: &Subckt) -> String {
     }
     for param in normalize_params(&s.params, false) {
         out.push(' ');
-        out.push_str(&format_param(&param));
+        out.push_str(&format_param(&param, dialect));
     }
     out
 }
 
-fn format_param(p: &Param) -> String {
+fn format_param(p: &Param, dialect: &dyn Dialect) -> String {
     let v = p.value.trim();
     if v.is_empty() {
         p.key.clone()
-    } else if needs_quotes(v) {
+    } else if dialect.space_around_eq() {
         format!("{} = {}", p.key, v)
     } else {
-        format!("{} = {}", p.key, v)
+        format!("{}={}", p.key, v)
     }
 }
 
@@ -279,10 +307,6 @@ fn normalize_value(v: &str) -> String {
         return t.to_string();
     }
     t.to_string()
-}
-
-fn needs_quotes(_v: &str) -> bool {
-    false
 }
 
 fn normalize_comment(c: &str) -> String {

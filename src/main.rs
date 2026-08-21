@@ -7,6 +7,11 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "spicefmt", about = "Highly opinionated SPICE formatter — HSPICE golden, dialect-extensible")]
+#[command(group(
+    clap::ArgGroup::new("mode")
+        .args(["check", "write", "lint", "print_dialect"])
+        .multiple(false)
+))]
 struct Args {
     #[arg(value_name = "FILE", help = "Input file (stdin if omitted)")]
     files: Vec<PathBuf>,

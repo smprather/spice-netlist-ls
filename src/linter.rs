@@ -68,6 +68,11 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
     // node(lowercase) -> (mention_count, first_line)
     let mut nodes: HashMap<String, (usize, usize)> = HashMap::new();
 
+    // First-written spelling per node (lowercase -> original) so a later
+    // re-spelling with different case in a case-insensitive dialect can be
+    // flagged as a likely typo.
+    let mut node_spellings: HashMap<String, (String, usize)> = HashMap::new();
+
     // instance-node mentions as written: (lowercase, original spelling, line)
     let mut inst_node_mentions: Vec<(String, String, usize)> = Vec::new();
 
@@ -102,11 +107,35 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                     // body isn't flagged floating.
                     for p in &s.ports {
                         bump(&mut nodes, p, start);
+                        node_spellings
+                            .entry(p.to_ascii_lowercase())
+                            .or_insert_with(|| (p.clone(), start));
                     }
                 }
             }
             Stmt::Directive(d) if d.name == "ends" => {
-                open_subckts.pop();
+                // Simulators close a subckt on any `.ends`; a name that does
+                // not match the open subckt is almost always a typo.
+                if let Some(ends_name) = d.args.first()
+                    && !ends_name.is_empty()
+                    && let Some((open_name, _)) = open_subckts.last()
+                    && !ends_name.eq_ignore_ascii_case(open_name)
+                {
+                    diags.push(Diagnostic {
+                        range: line_range(start as u32, trimmed.len() as u32),
+                        severity: Severity::Warning,
+                        code: "ends-name-mismatch",
+                        message: format!("'.ends {ends_name}' closes subckt '{open_name}'"),
+                    });
+                }
+                if open_subckts.pop().is_none() {
+                    diags.push(Diagnostic {
+                        range: line_range(start as u32, trimmed.len() as u32),
+                        severity: Severity::Warning,
+                        code: "stray-ends",
+                        message: ".ends without an open .subckt".to_string(),
+                    });
+                }
                 scopes.pop();
                 if scopes.is_empty() {
                     scopes.push(HashMap::new());
@@ -138,6 +167,24 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 for n in &inst.nodes {
                     bump(&mut nodes, n, start);
                     inst_node_mentions.push((n.to_ascii_lowercase(), n.clone(), start));
+                    let lower = n.to_ascii_lowercase();
+                    match node_spellings.get(&lower) {
+                        Some((orig, first_line)) if orig != n => {
+                            diags.push(Diagnostic {
+                                range: line_range(start as u32, trimmed.len() as u32),
+                                severity: Severity::Warning,
+                                code: "node-case-collision",
+                                message: format!(
+                                    "node '{n}' differs only by case from '{orig}' \
+                                     (first used on line {}); names are case-insensitive",
+                                    first_line + 1
+                                ),
+                            });
+                        }
+                        _ => {
+                            node_spellings.entry(lower).or_insert_with(|| (n.clone(), start));
+                        }
+                    }
                 }
 
                 if etype == Some('X') {

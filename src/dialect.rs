@@ -49,6 +49,12 @@ pub trait Dialect: Send + Sync {
     fn continuation_indent(&self) -> &'static str {
         "+ "
     }
+    /// `"key = value"` when true (HSPICE house style); `"key=value"` for
+    /// spectre, whose own examples and most netlists in the wild run them
+    /// together. Only affects formatter output — both parse identically.
+    fn space_around_eq(&self) -> bool {
+        true
+    }
     fn is_spectre(&self) -> bool {
         self.kind() == DialectKind::Spectre
     }
@@ -90,6 +96,9 @@ impl Dialect for SpectreDialect {
     }
     fn directive_prefix(&self) -> char {
         '.'
+    }
+    fn space_around_eq(&self) -> bool {
+        false
     }
 }
 

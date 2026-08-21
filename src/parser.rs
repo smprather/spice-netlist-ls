@@ -12,8 +12,7 @@ pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File {
         match &stmt {
             Stmt::Subckt(s) => {
                 if let Some(open) = stack.last_mut() {
-                    let sub = s.clone();
-                    open.body.push(Stmt::Subckt(sub));
+                    open.body.push(Stmt::Subckt(s.clone()));
                 } else {
                     stack.push(s.clone());
                     continue;
@@ -21,13 +20,14 @@ pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File {
             }
             Stmt::Directive(d) if d.name.eq_ignore_ascii_case("ends") => {
                 if let Some(mut sub) = stack.pop() {
+                    // Simulators close a subckt on any `.ends`; carry a
+                    // mismatching name so the formatter emits it verbatim
+                    // and the linter can warn.
                     if let Some(ends_name) = d.args.first()
                         && !ends_name.is_empty()
                         && !ends_name.eq_ignore_ascii_case(&sub.name)
                     {
-                        sub.body.push(Stmt::Directive(d.clone()));
-                        stack.push(sub);
-                        continue;
+                        sub.ends_name = Some(ends_name.clone());
                     }
                     let stmt = Stmt::Subckt(sub);
                     if let Some(parent) = stack.last_mut() {
@@ -76,14 +76,20 @@ fn join_continuations(input: &str, dialect: &dyn Dialect) -> Vec<String> {
 /// physical line numbers. Continuation lines merge into the preceding
 /// statement and extend its span. Blank lines are transparent, but a comment
 /// severs attachment: commenting out a statement must not silently re-attach
-/// its continuations to an unrelated element above (data corruption).
+/// its continuations to an unrelated element above (data corruption). An
+/// unattached continuation is kept verbatim — it is not a parse error and
+/// the linter flags it (`orphan-continuation`).
 pub fn logical_line_spans(input: &str, dialect: &dyn Dialect) -> Vec<(usize, usize, String)> {
     let mut out: Vec<(usize, usize, String)> = Vec::new();
     let cont = dialect.continuation_char();
     for (lineno, raw) in input.lines().enumerate() {
         let trimmed = raw.trim_start();
-        if trimmed.starts_with(cont) {
+        if trimmed.starts_with(cont) && !dialect.is_comment_line(trimmed) {
             let rest = trimmed[1..].trim();
+            // Attach to the most recent non-blank, non-comment logical line;
+            // a comment between parent and continuation breaks the chain so
+            // the continuation lands as an orphan rather than merging with an
+            // unrelated statement above.
             let mut attached = false;
             for idx in (0..out.len()).rev() {
                 let candidate = out[idx].2.trim();
@@ -194,7 +200,7 @@ pub fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
     }
 
     if code_trim.starts_with(dialect.directive_prefix()) {
-        return parse_directive(code_trim, inline_comment, dialect);
+        return parse_directive(code_trim, inline_comment);
     }
 
     parse_instance(code_trim, inline_comment)
@@ -217,6 +223,16 @@ fn split_inline_comment<'a>(line: &'a str, dialect: &dyn Dialect) -> (String, Op
             in_double = !in_double;
         }
         if !in_single && !in_double && ch == delim {
+            // `$` (HSPICE) and `;` (ngspice/LTspice) only start a comment when
+            // preceded by whitespace/`=`/`,`/start-of-line or followed by
+            // whitespace/end-of-line — otherwise they are inside a node name
+            // like `net;1` or a value like `a;b`.
+            let prev_ok = i == 0
+                || matches!(bytes[i - 1] as char, c if c.is_whitespace() || c == '=' || c == ',');
+            let next_ok = i + 1 >= bytes.len() || (bytes[i + 1] as char).is_whitespace();
+            if !(prev_ok || next_ok) {
+                continue;
+            }
             if delim == '/' && i + 1 < bytes.len() && bytes[i + 1] != b'/' as u8 {
                 continue;
             }
@@ -232,21 +248,11 @@ fn split_inline_comment<'a>(line: &'a str, dialect: &dyn Dialect) -> (String, Op
             let comment = line[i..].trim().to_string();
             return (code, Some(comment));
         }
-        if delim == '$' && !in_single && !in_double && ch == '$' {
-            let code = line[..i].to_string();
-            let comment = line[i..].trim().to_string();
-            return (code, Some(comment));
-        }
-        if delim == ';' && !in_single && !in_double && ch == ';' {
-            let code = line[..i].to_string();
-            let comment = line[i..].trim().to_string();
-            return (code, Some(comment));
-        }
     }
     (line.to_string(), None)
 }
 
-fn parse_directive(line: &str, inline_comment: Option<String>, _dialect: &dyn Dialect) -> Stmt {
+fn parse_directive(line: &str, inline_comment: Option<String>) -> Stmt {
     let inner = line[1..].trim();
     let mut tokens = tokenize(inner);
     if tokens.is_empty() {
@@ -281,6 +287,7 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
             params: Vec::new(),
             body: Vec::new(),
             inline_comment,
+            ends_name: None,
         });
     }
     let name = tokens.remove(0);
@@ -304,6 +311,7 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
         params,
         body: Vec::new(),
         inline_comment,
+        ends_name: None,
     })
 }
 
@@ -319,6 +327,9 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
     if matches!(etype, 'R' | 'C' | 'L') && rest.len() >= 2 {
         let nodes = vec![rest[0].clone(), rest[1].clone()];
         let tail = &rest[2..];
+        // Spectre writes `R1 (a b) resistor r=1k` — after tokenization the
+        // paren node list lands in a single token "(a b)". Keep the model
+        // name when the tail starts with a non-param token.
         let (model_or_value, params) = parse_tail_params(tail, &etype.to_string());
         return Stmt::Instance(Instance {
             name,
@@ -409,6 +420,17 @@ fn parse_tail_params(tail: &[String], etype: &str) -> (Option<String>, Vec<Param
     if tail.is_empty() {
         return (None, Vec::new());
     }
+    // `R1 a b = 10k` / `R1 a b =` — a bare "=" tail is a value with an empty
+    // key; keep it as the value rather than dropping it (or worse, dropping
+    // the whole line's value). Strip leading "=" tokens and re-process so
+    // `= 10k` becomes the value and `= 10k tc=1` keeps both.
+    if tail[0] == "=" {
+        let rest = &tail[1..];
+        if rest.is_empty() {
+            return (None, Vec::new());
+        }
+        return parse_tail_params(rest, etype);
+    }
     let has_eq = tail.iter().any(|t| t == "=" || t.contains('='));
     if has_eq {
         let is_first_val = !tail[0].contains('=') && tail[0] != "=" && !(tail.len() > 1 && tail[1] == "=");
@@ -420,10 +442,12 @@ fn parse_tail_params(tail: &[String], etype: &str) -> (Option<String>, Vec<Param
             }
             let has_param_eq = tail[1..].iter().any(|t| t == "=" || t.contains('='));
             if has_param_eq {
+                // The leading positional token is the model/value (`resistor`
+                // in `R1 a b resistor r=1k`); keep it and treat the rest as
+                // params. The special case `R1 a b r=5` (no model name, the
+                // param key *is* the canonical param) has first == tail's
+                // param key, handled below.
                 let (_, params) = split_args_params(tail[1..].to_vec());
-                if !params.is_empty() && params[0].key.eq_ignore_ascii_case(etype) {
-                    return (Some(params[0].value.clone()), params[1..].to_vec());
-                }
                 return (Some(first), params);
             }
         }
@@ -449,17 +473,20 @@ fn split_args_params(tokens: Vec<String>) -> (Vec<String>, Vec<Param>) {
     while i < tokens.len() {
         let tok = &tokens[i];
         if tok == "=" {
+            // Standalone "=" re-attaches the previous positional arg as a
+            // param key; a dangling trailing "=" yields an empty value, which
+            // is still better than silently discarding the token.
             if let Some(prev) = args.pop() {
-                let val = if i + 1 < tokens.len() {
+                if i + 1 < tokens.len() && tokens[i + 1] != "=" {
                     i += 1;
-                    tokens[i].clone()
+                    let value = tokens[i].trim().to_string();
+                    params.push(Param { key: prev, value });
                 } else {
-                    String::new()
-                };
-                params.push(Param {
-                    key: prev,
-                    value: val.trim().to_string(),
-                });
+                    params.push(Param {
+                        key: prev,
+                        value: String::new(),
+                    });
+                }
             }
             i += 1;
             continue;
@@ -497,7 +524,21 @@ fn split_args_params(tokens: Vec<String>) -> (Vec<String>, Vec<Param>) {
                 i += 3;
                 continue;
             }
-            if i + 1 < tokens.len() && tokens[i + 1].contains('=') {
+            if i + 1 < tokens.len() && tokens[i + 1] == "=" {
+                // A standalone "=" followed by "=" or at end-of-line is
+                // malformed; attach an empty value rather than stealing the
+                // next token, which a later iteration would treat as a key.
+                let value = if i + 2 < tokens.len() && tokens[i + 2] != "=" {
+                    tokens[i + 2].trim().to_string()
+                } else {
+                    String::new()
+                };
+                let consumed = if value.is_empty() { 2 } else { 3 };
+                params.push(Param { key: tok.clone(), value });
+                i += consumed;
+                continue;
+            }
+        if i + 1 < tokens.len() && tokens[i + 1].contains('=') {
                 args.push(tok.clone());
                 i += 1;
                 continue;

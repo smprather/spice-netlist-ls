@@ -1,6 +1,6 @@
 use lsp_server::{Connection, Message, Request, RequestId, Response};
 use lsp_types::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -24,30 +24,40 @@ fn main() -> anyhow::Result<()> {
         eprintln!("spice-netlist-ls: started (dialect auto-detect, formatter + definition)");
     }
 
+    // Text of open buffers, keyed by URI. LSP didOpen/didChange keep this
+    // in sync; formatting/definition respond against the in-memory text,
+    // falling back to disk only for unopened files.
+    let mut docs: HashMap<Uri, String> = HashMap::new();
+
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
                     break;
                 }
-                handle_request(&connection, req)?;
+                handle_request(&connection, req, &docs)?;
             }
             Message::Response(_) => {}
             Message::Notification(notif) => match notif.method.as_str() {
                 "textDocument/didOpen" => {
                     let params: DidOpenTextDocumentParams = serde_json::from_value(notif.params)?;
-                    publish_diagnostics(
-                        &connection,
-                        &params.text_document.uri,
-                        &params.text_document.text,
-                    )?;
+                    let uri = params.text_document.uri;
+                    let text = params.text_document.text;
+                    docs.insert(uri.clone(), text.clone());
+                    publish_diagnostics(&connection, &uri, &text)?;
                 }
                 "textDocument/didChange" => {
                     let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
                     // full sync — the last content change carries the whole document
                     if let Some(text) = params.content_changes.last().map(|c| c.text.clone()) {
+                        docs.insert(params.text_document.uri.clone(), text.clone());
                         publish_diagnostics(&connection, &params.text_document.uri, &text)?;
                     }
+                }
+                "textDocument/didClose" => {
+                    let params: DidCloseTextDocumentParams = serde_json::from_value(notif.params)?;
+                    docs.remove(&params.text_document.uri);
+                    publish_diagnostics(&connection, &params.text_document.uri, "")?;
                 }
                 _ => {}
             },
@@ -59,6 +69,15 @@ fn main() -> anyhow::Result<()> {
     drop(connection);
     io_threads.join()?;
     Ok(())
+}
+
+/// In-memory text for `uri` if the client has the document open, else the
+/// on-disk contents. Likes an empty string when neither exists.
+fn text_for(uri: &Uri, docs: &HashMap<Uri, String>) -> String {
+    docs.get(uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(uri.path().as_str()).ok())
+        .unwrap_or_default()
 }
 
 fn publish_diagnostics(connection: &Connection, uri: &Uri, text: &str) -> anyhow::Result<()> {
@@ -94,13 +113,17 @@ fn publish_diagnostics(connection: &Connection, uri: &Uri, text: &str) -> anyhow
     Ok(())
 }
 
-fn handle_request(connection: &Connection, req: Request) -> anyhow::Result<()> {
+fn handle_request(
+    connection: &Connection,
+    req: Request,
+    docs: &HashMap<Uri, String>,
+) -> anyhow::Result<()> {
     match req.method.as_str() {
         "textDocument/formatting" => {
             let (id, params): (RequestId, DocumentFormattingParams) =
                 (req.id, serde_json::from_value(req.params)?);
             let uri = params.text_document.uri;
-            let text = std::fs::read_to_string(uri.path().as_str()).unwrap_or_default();
+            let text = text_for(&uri, docs);
             let opts = spice_netlist_ls::formatter::FormatOptions {
                 dialect: spice_netlist_ls::detect_dialect(&text),
                 ..Default::default()
@@ -129,7 +152,7 @@ fn handle_request(connection: &Connection, req: Request) -> anyhow::Result<()> {
                 (req.id, serde_json::from_value(req.params)?);
             let uri = params.text_document_position_params.text_document.uri;
             let path = PathBuf::from(uri.path().as_str());
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = text_for(&uri, docs);
             let dialect = spice_netlist_ls::get_dialect(spice_netlist_ls::detect_dialect(&text));
             let location = spice_netlist_ls::parser::subckt_ref_at_line(
                 &text,

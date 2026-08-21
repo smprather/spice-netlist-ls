@@ -32,6 +32,14 @@ echo ".PARAM w=1u" | ./target/release/spicefmt --dialect hspice
 
 Dialect is auto-detected per file: dialect-exclusive grammar is decisive (`.control`/`.csparam`/`$&` meas-result refs → ngspice; `.alter`/`.protect` → hspice; `.step`/`.backanno` → ltspice; `//` comments/paren node syntax → spectre); shared markers (`.probe`, `;` vs `$`) add weak evidence; falls back to hspice. Override with `--dialect`.
 
+## Formatter invariants
+
+- Output is **idempotent** — `spicefmt | spicefmt` is a fixed point.
+- A `+` continuation joined to a parent is merged; an **orphan** continuation (no parent statement, e.g. the parent was commented out) is preserved verbatim and flagged by the linter as `orphan-continuation`.
+- Inline comments stay comments: a comment bumped past `max_width` moves to its own `+ <delim> text` continuation line instead of being split mid-comment into what would become code.
+- `key = value` spacing is HSPICE-style; spectre emits `key=value` per the dialect's `space_around_eq()`.
+- `.ends <name>` that names a different subckt than the one it closes is kept as written and flagged as `ends-name-mismatch`.
+
 ## Extensibility
 
 ```rust
@@ -50,12 +58,13 @@ Add a dialect: implement `Dialect`, register in `dialect_from_str`, no parser re
 - [x] HSPICE formatter (idempotent, generic params)
 - [x] LSP formatting stub
 - [x] LSP go-to-definition: `X` instantiation → `.subckt` (follows `.include`/`.inc`/`.lib` transitively)
-- [x] Linter (undefined subckt, arity, floating nodes, duplicate instances, unterminated subckt) — LSP diagnostics + `spicefmt --lint`
+- [x] Linter (undefined subckt, arity, floating nodes, duplicate instances, unterminated subckt, `.ends` name mismatch, stray `.ends`, node case-collision, orphan continuation) — LSP diagnostics + `spicefmt --lint`
 - [ ] PyPI wrapper package exposing `spicefmt` (must not collide with the Rust binary's entry point)
 
 ## Test
 
 ```bash
-cargo test
-ngspice -b testdata/simple_rc_chain.subckt  # via fmt roundtrip
+cargo test                                        # unit + CLI integration + insta snapshots
+INSTA_UPDATE=always cargo test --test snapshots   # accept snapshot updates
+ls testdata/                                      # dialect fixtures; snapshot-tested
 ```

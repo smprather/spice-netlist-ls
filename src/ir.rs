@@ -42,6 +42,10 @@ pub struct Subckt {
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
     pub inline_comment: Option<String>,
+    /// Name token carried by the original `.ends <name>` line when it differs
+    /// from `name`. When `Some`, the formatter emits `.ends <ends_name>` so
+    /// a mismatch is preserved across round-trips (the linter warns).
+    pub ends_name: Option<String>,
 }
 
 impl File {

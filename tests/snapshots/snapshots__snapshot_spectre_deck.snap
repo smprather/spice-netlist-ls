@@ -1,0 +1,10 @@
+---
+source: tests/snapshots.rs
+expression: "format_str(&input, &FormatOptions { dialect: kind, ..Default::default() })"
+---
+// spectre netlist — paren node syntax and // comments
+simulator lang=spectre
+parameters vdd=1.2
+Vdd (vdd 0) vsource dc=vdd
+M1 (d g 0 0) nch w=1u l=1u
+R1 (a b) resistor r=1k // inline

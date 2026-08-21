@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+expression: "format_str(&input, &FormatOptions { dialect: kind, ..Default::default() })"
+---
+* ltspice deck: .step/.backanno are dialect-decisive
+.step param R list 1k 2k 5k
+.tran 10u
+R1 a b {R} ; gain set by step
+C1 b 0 1p
+.backanno
+.end

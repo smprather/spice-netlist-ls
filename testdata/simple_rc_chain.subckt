@@ -1,0 +1,16 @@
+* RC chain driven by a pulse source — exercises .param braces,
+* continuation, subckt def/call, and the title-line convention.
+RC lowpass
+.param rser = 1k cload = '1.2*1p'
+
+.subckt rcstage in out
+R1 in mid {rser}
+C1 mid 0 {cload}
+.ends rcstage
+
+Vdd vdd 0 1.2
+Vin in 0 pulse(0 1.2 0 100p 100p 1n 2n)
+X1 in n1 rcstage rser = 2k
+X2 n1 out rcstage
+.tran 1p 10n
+.end
