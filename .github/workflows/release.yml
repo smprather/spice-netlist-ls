@@ -81,6 +81,16 @@ jobs:
       - name: Install dist
         if: runner.os != 'Windows'
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
+      - name: Install dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-RestMethod https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.ps1 | Invoke-Expression
+      - name: Install cross tools (aarch64-musl on x64 Linux)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          pip3 install ziglang
+          cargo install --locked cargo-zigbuild
       - name: dist build
         run: cargo dist build --target=${{ matrix.target }} --artifacts=local --output-format=json
 
