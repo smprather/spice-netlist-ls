@@ -97,10 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.target }}
-          path: |
-            target/distrib/*/*.tar.gz
-            target/distrib/*/*.zip
-            target/distrib/*/*.sha256
+          path: target/distrib/*
           if-no-files-found: error
 
   host:
