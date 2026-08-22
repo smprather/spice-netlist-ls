@@ -42,12 +42,14 @@ jobs:
           submodules: recursive
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
+      # In dist >= 0.25, creating the GitHub Release is an explicit host
+      # step (`--steps=create`) run from the plan job; a bare `dist plan`
+      # would never publish anything.
       - id: plan
-        # GITHUB_OUTPUT values containing newlines must be set with a
-        # heredoc-style delimiter; plain `key=value` breaks on the
-        # multi-line dist manifest JSON.
+        env:
+          TAG: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
         run: |
-          cargo dist plan ${{ steps.plan.outputs.tag-flag }} --output-format=json > dist-manifest.json
+          cargo dist host --steps=create --tag="$TAG" --output-format=json > dist-manifest.json
           {
             echo 'val<<DIST_MANIFEST_EOF'
             cat dist-manifest.json
@@ -117,4 +119,7 @@ jobs:
           merge-multiple: true
       - name: Publish git tag
         if: needs.plan.outputs.publishing
-        run: cargo dist host ${{ needs.plan.outputs.tag-flag }}
+        env:
+          TAG: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
+        run: |
+          cargo dist host --tag="$TAG" --steps=upload --steps=release
