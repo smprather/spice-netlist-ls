@@ -43,9 +43,16 @@ jobs:
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
       - id: plan
+        # GITHUB_OUTPUT values containing newlines must be set with a
+        # heredoc-style delimiter; plain `key=value` breaks on the
+        # multi-line dist manifest JSON.
         run: |
           cargo dist plan ${{ steps.plan.outputs.tag-flag }} --output-format=json > dist-manifest.json
-          echo "val=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo 'val<<DIST_MANIFEST_EOF'
+            cat dist-manifest.json
+            echo 'DIST_MANIFEST_EOF'
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: artifacts-dist-manifest
