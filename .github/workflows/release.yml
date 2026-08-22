@@ -93,13 +93,26 @@ jobs:
           cargo install --locked cargo-zigbuild
       - name: dist build
         run: cargo dist build --target=${{ matrix.target }} --artifacts=local --output-format=json
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/distrib/*/*.tar.gz
+            target/distrib/*/*.zip
+            target/distrib/*/*.sha256
+          if-no-files-found: error
 
   host:
     needs: [plan, build-local-artifacts]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-all-artifacts@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
       - name: Publish git tag
         if: needs.plan.outputs.publishing
         run: cargo dist host ${{ needs.plan.outputs.tag-flag }}
