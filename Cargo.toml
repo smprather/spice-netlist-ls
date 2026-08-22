@@ -33,7 +33,7 @@ lto = true
 # Hand-maintained: this block plus .github/workflows/release.yml are written
 # for our needs (plain tarballs first-class, air-gap-friendly) rather than
 # whatever `dist init` last generated, so tell dist not to fight us.
-allow-dirty = true
+allow-dirty = ["ci", "cargo-dist"]
 cargo-dist-version = "0.28.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
