@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Highly opinionated SPICE formatter and language server — HSPICE golden reference, dialect-extensible"
 license = "MIT"
+repository = "https://github.com/smprather/spice-netlist-ls"
+homepage = "https://github.com/smprather/spice-netlist-ls"
+documentation = "https://github.com/smprather/spice-netlist-ls"
+keywords = ["spice", "hspice", "netlist", "formatter", "linter", "lsp", "spectre", "ngspice", "ltspice"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [[bin]]
 name = "spicefmt"
@@ -17,6 +22,28 @@ path = "src/bin/ls.rs"
 name = "spice_netlist_ls"
 path = "src/lib.rs"
 
+# cargo-dist metadata: pre-built, statically linked where feasible, with
+# an installer script as a convenience and plain tarballs + sha256sums so
+# air-gapped mirrors can just rsync the releases page.
+[profile.dist]
+inherits = "release"
+lto = true
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = ["github"]
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+dist-url = "https://github.com/smprather/spice-netlist-ls"
+tap = "smprather/homebrew-spicefmt"
+bin-aliases = { spicefmt = [], spice-netlist-ls = [] }
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
@@ -25,10 +52,16 @@ lsp-server = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+toml = "0.8"
+directories = "6"
 
 [dev-dependencies]
-insta = "1.38"
+insta = { version = "1.38", features = ["toml"] }
 tempfile = "3"
+
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.3"
 
 [features]
 default = []

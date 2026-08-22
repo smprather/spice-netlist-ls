@@ -1,0 +1,88 @@
+# Release workflow for cargo-dist.
+#
+# Trigger by pushing a `vX.Y.Z` tag. cargo-dist builds per-target binaries
+# (statically linked on linux-*-musl, so the same artifact works on glibc
+# distros), creates a GitHub Release with:
+#   * plain .tar.gz / .zip per platform — first-class, rsync-friendly
+#   * install script (shell / powershell) for convenience
+#   * sha256sums for integrity verification without trusting the network
+#   * the man page (`spicefmt.1`) from build.rs inside each tarball
+#
+# Air-gapped mirrors: `reposync` or a cron'd `gh release download -p '*.tar.gz'`
+# against this workflow's output yields a working internal repository.
+
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
+      tag-flag: ${{ !startsWith(github.ref, 'refs/tags/') && format('--tag={0}', inputs.tag) || '' }}
+      publishing: ${{ startsWith(github.ref, 'refs/tags/') }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
+      - id: plan
+        run: |
+          cargo dist plan ${{ steps.plan.outputs.tag-flag }} --output-format=json > dist-manifest.json
+          echo "val=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+
+  build-local-artifacts:
+    name: Build (${{ matrix.target }})
+    needs: plan
+    if: needs.plan.outputs.val != 'null'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-latest }
+          - { target: x86_64-apple-darwin, runner: macos-14 }
+          - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+      - name: Install dist
+        if: runner.os != 'Windows'
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
+      - name: dist build
+        run: cargo dist build --target=${{ matrix.target }} --artifacts=local --output-format=json
+
+  host:
+    needs: [plan, build-local-artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-all-artifacts@v4
+      - name: Publish git tag
+        if: needs.plan.outputs.publishing
+        run: cargo dist host ${{ needs.plan.outputs.tag-flag }}

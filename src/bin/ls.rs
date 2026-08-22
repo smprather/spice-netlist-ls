@@ -124,10 +124,11 @@ fn handle_request(
                 (req.id, serde_json::from_value(req.params)?);
             let uri = params.text_document.uri;
             let text = text_for(&uri, docs);
-            let opts = spice_netlist_ls::formatter::FormatOptions {
-                dialect: spice_netlist_ls::detect_dialect(&text),
-                ..Default::default()
-            };
+            let opts = spice_netlist_ls::config::format_options_for(
+                Some(&PathBuf::from(uri.path().as_str())),
+                None,
+                spice_netlist_ls::detect_dialect(&text),
+            );
             let formatted = spice_netlist_ls::format_str(&text, &opts);
             let edits = if text == formatted {
                 Vec::new()

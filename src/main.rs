@@ -1,39 +1,10 @@
 use clap::Parser;
+use spice_netlist_ls::cli::{Args, LintFormat};
+use spice_netlist_ls::config::format_options_for;
 use spice_netlist_ls::detect::detect_dialect;
-use spice_netlist_ls::dialect::{dialect_from_str, DialectKind};
-use spice_netlist_ls::formatter::FormatOptions;
+use spice_netlist_ls::dialect::{DialectKind, dialect_from_str};
 use std::fs;
 use std::path::PathBuf;
-
-#[derive(Parser, Debug)]
-#[command(name = "spicefmt", about = "Highly opinionated SPICE formatter — HSPICE golden, dialect-extensible")]
-#[command(group(
-    clap::ArgGroup::new("mode")
-        .args(["check", "write", "lint", "print_dialect"])
-        .multiple(false)
-))]
-struct Args {
-    #[arg(value_name = "FILE", help = "Input file (stdin if omitted)")]
-    files: Vec<PathBuf>,
-
-    #[arg(long, help = "Check only, exit 1 if not formatted")]
-    check: bool,
-
-    #[arg(long, help = "Write back to file in-place")]
-    write: bool,
-
-    #[arg(long, value_name = "DIALECT", help = "Dialect: hspice, ngspice, spectre, ltspice, or auto (default: auto)")]
-    dialect: Option<String>,
-
-    #[arg(long, help = "Detect and print dialect per input, no formatting")]
-    print_dialect: bool,
-
-    #[arg(long, help = "Lint only: print diagnostics, exit 1 on error-severity findings")]
-    lint: bool,
-
-    #[arg(long, help = "Print dialect list and exit")]
-    list_dialects: bool,
-}
 
 fn main() {
     let args = Args::parse();
@@ -65,13 +36,10 @@ fn main() {
             return;
         }
         if args.lint {
-            let has_error = run_lint("<stdin>", &input, kind, None);
+            let has_error = run_lint("<stdin>", &input, kind, None, args.format);
             std::process::exit(if has_error { 1 } else { 0 });
         }
-        let opts = FormatOptions {
-            dialect: kind,
-            ..Default::default()
-        };
+        let mut opts = format_options_for(None, fixed, kind);
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -100,15 +68,12 @@ fn main() {
             continue;
         }
         if args.lint {
-            if run_lint(&path.display().to_string(), &input, kind, Some(path)) {
+            if run_lint(&path.display().to_string(), &input, kind, Some(path), args.format) {
                 exit_code = 1;
             }
             continue;
         }
-        let opts = FormatOptions {
-            dialect: kind,
-            ..Default::default()
-        };
+        let mut opts = format_options_for(Some(path), fixed, kind);
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -129,7 +94,7 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>) -> bool {
+fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>, fmt: LintFormat) -> bool {
     let dialect = spice_netlist_ls::get_dialect(kind);
     let opts = match path {
         Some(p) => spice_netlist_ls::linter::LintOptions {
@@ -137,20 +102,26 @@ fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>) 
         },
         None => spice_netlist_ls::linter::LintOptions::default(),
     };
-    let mut has_error = false;
-    for d in spice_netlist_ls::linter::lint_str(input, &dialect, &opts) {
-        if d.severity == spice_netlist_ls::linter::Severity::Error {
-            has_error = true;
+    let diags = spice_netlist_ls::linter::lint_str(input, &dialect, &opts);
+    let has_error = diags
+        .iter()
+        .any(|d| d.severity == spice_netlist_ls::linter::Severity::Error);
+    match fmt {
+        LintFormat::Human => {
+            for d in &diags {
+                println!(
+                    "{}:{}:{}: {} [{}]: {}",
+                    name,
+                    d.range.start_line + 1,
+                    d.range.start_col + 1,
+                    d.severity.as_str(),
+                    d.code,
+                    d.message
+                );
+            }
         }
-        println!(
-            "{}:{}:{}: {} [{}]: {}",
-            name,
-            d.range.start_line + 1,
-            d.range.start_col + 1,
-            d.severity.as_str(),
-            d.code,
-            d.message
-        );
+        LintFormat::Json => print!("{}", spice_netlist_ls::linter::diagnostics_as_json(name, &diags)),
+        LintFormat::Sarif => println!("{}", spice_netlist_ls::linter::diagnostics_as_sarif(name, &diags)),
     }
     has_error
 }

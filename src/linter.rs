@@ -1,6 +1,7 @@
 use crate::dialect::Dialect;
-use crate::parser::{logical_line_spans, parse_logical_line};
 use crate::ir::Stmt;
+use crate::parser::{logical_line_spans, parse_logical_line};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,6 +10,165 @@ use std::sync::Arc;
 pub enum Severity {
     Error,
     Warning,
+}
+
+/// Machine-readable output formats for `spicefmt --lint --format`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LintReportFormat {
+    /// `path:line:col: severity [code]: message` — stable, grep-friendly.
+    #[default]
+    Human,
+    /// Newline-delimited JSON: one diagnostic object per line.
+    Json,
+    /// Static Analysis Results Interchange Format; GitLab/GitHub Enterprise
+    /// merge-request UIs render this natively without any plugin.
+    Sarif,
+}
+
+#[derive(Serialize)]
+struct DiagnosticJson<'a> {
+    path: &'a str,
+    line: u32,
+    col: u32,
+    severity: &'a str,
+    code: &'a str,
+    message: &'a str,
+}
+
+pub fn diagnostics_as_json(path: &str, diags: &[Diagnostic]) -> String {
+    let mut out = String::new();
+    for d in diags {
+        let rec = DiagnosticJson {
+            path,
+            line: d.range.start_line + 1,
+            col: d.range.start_col + 1,
+            severity: d.severity.as_str(),
+            code: d.code,
+            message: &d.message,
+        };
+        out.push_str(&serde_json::to_string(&rec).unwrap_or_default());
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifLog<'a> {
+    version: &'static str,
+    #[serde(rename = "$schema")]
+    schema: &'static str,
+    runs: Vec<SarifRun<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRun<'a> {
+    tool: SarifTool,
+    results: Vec<SarifResult<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifTool {
+    driver: SarifDriver,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifDriver {
+    name: &'static str,
+    version: &'static str,
+    information_uri: &'static str,
+    rules: Vec<SarifRule>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRule {
+    id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifResult<'a> {
+    rule_id: &'a str,
+    level: &'static str,
+    message: SarifMessage<'a>,
+    locations: Vec<SarifLocation<'a>>,
+}
+
+#[derive(Serialize)]
+struct SarifMessage<'a> {
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifLocation<'a> {
+    physical_location: SarifPhysicalLocation<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifPhysicalLocation<'a> {
+    artifact_location: SarifArtifactLocation<'a>,
+    region: SarifRegion,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifArtifactLocation<'a> {
+    uri: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRegion {
+    start_line: u32,
+    start_column: u32,
+}
+
+pub fn diagnostics_as_sarif(path: &str, diags: &[Diagnostic]) -> String {
+    let mut rules: Vec<String> = diags.iter().map(|d| d.code.to_string()).collect();
+    rules.sort();
+    rules.dedup();
+    let results = diags
+        .iter()
+        .map(|d| SarifResult {
+            rule_id: d.code,
+            level: match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            },
+            message: SarifMessage { text: &d.message },
+            locations: vec![SarifLocation {
+                physical_location: SarifPhysicalLocation {
+                    artifact_location: SarifArtifactLocation { uri: path },
+                    region: SarifRegion {
+                        start_line: d.range.start_line + 1,
+                        start_column: d.range.start_col + 1,
+                    },
+                },
+            }],
+        })
+        .collect();
+    let log = SarifLog {
+        version: "2.1.0",
+        schema: "https://json.schemastore.org/sarif-2.1.0.json",
+        runs: vec![SarifRun {
+            tool: SarifTool {
+                driver: SarifDriver {
+                    name: "spicefmt",
+                    version: env!("CARGO_PKG_VERSION"),
+                    information_uri: "https://github.com/smprather/spice-netlist-ls",
+                    rules: rules.into_iter().map(|id| SarifRule { id }).collect(),
+                },
+            },
+            results,
+        }],
+    };
+    serde_json::to_string_pretty(&log).unwrap_or_default()
 }
 
 impl Severity {

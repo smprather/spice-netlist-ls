@@ -176,3 +176,63 @@ fn testdata_files_format_to_self() {
         assert_eq!(out, out2, "{name} formatting should be idempotent");
     }
 }
+
+// ---------- lint output formats ----------
+
+#[test]
+fn lint_json_emits_one_object_per_diagnostic() {
+    let (out, _, code) = run(&["--lint", "--format", "json"], Some("X1 a b missing\n"));
+    assert_eq!(code, 1);
+    let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!lines.is_empty());
+    for l in lines {
+        let v: serde_json::Value = serde_json::from_str(l).unwrap();
+        assert_eq!(v["path"], "<stdin>");
+        assert!(v["code"].is_string());
+        assert!(v["message"].is_string());
+    }
+}
+
+#[test]
+fn lint_sarif_emits_valid_schema() {
+    let (out, _, code) = run(&["--lint", "--format", "sarif"], Some("X1 a b missing\n"));
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["version"], "2.1.0");
+    assert_eq!(v["runs"][0]["tool"]["driver"]["name"], "spicefmt");
+    assert!(!v["runs"][0]["results"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn format_flag_requires_lint() {
+    let (_, _, code) = run(&["--format", "json"], Some("x\n"));
+    assert_eq!(code, 2);
+}
+
+// ---------- config file ----------
+
+#[test]
+fn spicefmt_toml_sets_max_width() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("spicefmt.toml"), "max_width = 40\n").unwrap();
+    let f = dir.path().join("a.sp");
+    // Long line, fits at 120 but not at 40
+    std::fs::write(&f, "M1 n1 n2 n3 n4 pch w=1u l=1u ad=1p as=1p pd=1u ps=1u nrd=1 nrs=1\n").unwrap();
+    let p = f.to_string_lossy().to_string();
+    let (out, _, _) = run(&[p.as_str()], None);
+    assert!(out.lines().all(|l| l.len() <= 40), "got {out}");
+    assert!(out.contains("+"), "long line should wrap: {out}");
+}
+
+#[test]
+fn spicefmt_toml_dialect_override_changes_format_style() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("spicefmt.toml"), "dialect = \"spectre\"\n").unwrap();
+    let f = dir.path().join("a.sp");
+    std::fs::write(&f, "R1 a b resistor r=1k\n").unwrap();
+    // spectre emits key=value (no spaces)
+    let p = f.to_string_lossy().to_string();
+    let (out, _, _) = run(&[p.as_str()], None);
+    assert!(out.contains("r=1k"), "got {out}");
+    assert!(!out.contains("r = 1k"), "got {out}");
+}

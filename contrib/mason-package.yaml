@@ -1,0 +1,29 @@
+# Draft mason-registry package definition for spice-netlist-ls.
+# Drop into `packages/spice-netlist-ls/package.yaml` in a fork of
+# https://github.com/mason-org/mason-registry and open a PR.
+#
+# Mason fetches release tarballs directly; air-gapped sites mirror GitHub
+# Releases and point Mason at their own registry (mason 2.x `registries`).
+
+name: spice-netlist-ls
+description: Formatter + linter + LSP for SPICE netlists (HSPICE golden, dialect-extensible)
+homepage: https://github.com/smprather/spice-netlist-ls
+licenses: [MIT]
+languages: []
+categories: [LSP, Formatter, Linter]
+
+source:
+  id: pkg:github/smprather/spice-netlist-ls@v0.1.0
+  build:
+    - target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+      files:
+        - "spicefmt-{{ target }}.tar.gz:{{ target | take_file_name }}"
+      bin: ["spicefmt", "spice-netlist-ls"]
+    - target: [x86_64-apple-darwin, aarch64-apple-darwin]
+      files:
+        - "spicefmt-{{ target }}.tar.gz:{{ target | take_file_name }}"
+      bin: ["spicefmt", "spice-netlist-ls"]
+    - target: x86_64-pc-windows-msvc
+      files:
+        - "spicefmt-{{ target }}.zip:{{ target | take_file_name }}"
+      bin: ["spicefmt.exe", "spice-netlist-ls.exe"]
