@@ -1,5 +1,5 @@
 use clap::Parser;
-use spice_netlist_ls::cli::{Args, LintFormat};
+use spice_netlist_ls::cli::{Args, ErrorOn, LintFormat};
 use spice_netlist_ls::config::format_options_for;
 use spice_netlist_ls::detect::detect_dialect;
 use spice_netlist_ls::dialect::{DialectKind, dialect_from_str};
@@ -36,7 +36,7 @@ fn main() {
             return;
         }
         if args.lint {
-            let has_error = run_lint("<stdin>", &input, kind, None, args.format);
+            let has_error = run_lint("<stdin>", &input, kind, None, args.format, args.error_on, args.max_warnings);
             std::process::exit(if has_error { 1 } else { 0 });
         }
         let mut opts = format_options_for(None, fixed, kind);
@@ -68,7 +68,7 @@ fn main() {
             continue;
         }
         if args.lint {
-            if run_lint(&path.display().to_string(), &input, kind, Some(path), args.format) {
+            if run_lint(&path.display().to_string(), &input, kind, Some(path), args.format, args.error_on, args.max_warnings) {
                 exit_code = 1;
             }
             continue;
@@ -94,21 +94,46 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>, fmt: LintFormat) -> bool {
+fn run_lint(
+    name: &str,
+    input: &str,
+    kind: DialectKind,
+    path: Option<&PathBuf>,
+    fmt: LintFormat,
+    error_on: ErrorOn,
+    max_warnings: Option<usize>,
+) -> bool {
+    use spice_netlist_ls::linter::{LintOptions, Severity};
+    use std::collections::HashMap;
+
     let dialect = spice_netlist_ls::get_dialect(kind);
-    let opts = match path {
-        Some(p) => spice_netlist_ls::linter::LintOptions {
-            external_subckts: spice_netlist_ls::linter::external_subckts(p, &dialect),
-        },
-        None => spice_netlist_ls::linter::LintOptions::default(),
+    let mut diags = {
+        let opts = match path {
+            Some(p) => LintOptions {
+                external_subckts: spice_netlist_ls::linter::external_subckts(p, &dialect),
+            },
+            None => LintOptions::default(),
+        };
+        spice_netlist_ls::linter::lint_str(input, &dialect, &opts)
     };
-    let diags = spice_netlist_ls::linter::lint_str(input, &dialect, &opts);
-    let has_error = diags
-        .iter()
-        .any(|d| d.severity == spice_netlist_ls::linter::Severity::Error);
+
+    // Project policy from [lint] in spicefmt.toml (CLI beats nothing here —
+    // this *is* the project's voice; --error-on/--max-warnings are the CI's).
+    let policy = path.map(|p| spice_netlist_ls::config::lint_config_for(p)).unwrap_or_default();
+    for d in &mut diags {
+        if let Some(s) = policy.severity.get(d.code) {
+            match s.as_str() {
+                "error" => d.severity = Severity::Error,
+                "warning" => d.severity = Severity::Warning,
+                _ => {}
+            }
+        }
+    }
+    let active: Vec<_> = diags.iter().filter(|d| !policy.is_suppressed(d.code)).collect();
+
     match fmt {
         LintFormat::Human => {
-            for d in &diags {
+            for d in &active {
                 println!(
                     "{}:{}:{}: {} [{}]: {}",
                     name,
@@ -120,10 +145,53 @@ fn run_lint(name: &str, input: &str, kind: DialectKind, path: Option<&PathBuf>, 
                 );
             }
         }
-        LintFormat::Json => print!("{}", spice_netlist_ls::linter::diagnostics_as_json(name, &diags)),
-        LintFormat::Sarif => println!("{}", spice_netlist_ls::linter::diagnostics_as_sarif(name, &diags)),
+        LintFormat::Json => print!(
+            "{}",
+            spice_netlist_ls::linter::diagnostics_as_json(
+                name,
+                &active.iter().map(|d| (*d).clone()).collect::<Vec<_>>()
+            )
+        ),
+        LintFormat::Sarif => println!(
+            "{}",
+            spice_netlist_ls::linter::diagnostics_as_sarif(
+                name,
+                &active.iter().map(|d| (*d).clone()).collect::<Vec<_>>()
+            )
+        ),
+        LintFormat::Summary => {
+            let mut counts: HashMap<(&str, &str), usize> = HashMap::new();
+            for d in &diags {
+                *counts.entry((d.severity.as_str(), d.code)).or_default() += 1;
+            }
+            let mut rows: Vec<((usize, &str, &str))> = counts
+                .into_iter()
+                .map(|((sev, code), n)| (n, sev, code))
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(b.2)));
+            for (n, sev, code) in &rows {
+                let mark = if policy.is_suppressed(code) { "  [suppressed]" } else { "" };
+                println!("{n:>9}  {sev:<7}  {code}{mark}");
+            }
+            let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+            let warnings = diags.len() - errors;
+            println!(
+                "{:>9}  finding(s): {} error(s), {} warning(s)",
+                diags.len(),
+                errors,
+                warnings
+            );
+        }
     }
-    has_error
+
+    // Exit decision counts only non-suppressed findings.
+    let errors = active.iter().filter(|d| d.severity == Severity::Error).count();
+    let warnings = active.iter().filter(|d| d.severity == Severity::Warning).count();
+    let over_max = max_warnings.is_some_and(|n| warnings > n);
+    match error_on {
+        ErrorOn::Warning => errors > 0 || warnings > 0 || over_max,
+        ErrorOn::Error => errors > 0 || over_max,
+    }
 }
 
 fn read_stdin() -> String {

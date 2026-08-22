@@ -7,6 +7,10 @@ pub struct FormatOptions {
     pub max_width: usize,
     pub indent: &'static str,
     pub sort_params: bool,
+    /// Ensure the output ends with exactly one `\n`.
+    pub insert_final_newline: bool,
+    /// Strip trailing whitespace from every emitted line.
+    pub trim_trailing_whitespace: bool,
 }
 
 impl Default for FormatOptions {
@@ -16,6 +20,8 @@ impl Default for FormatOptions {
             max_width: 120,
             indent: "",
             sort_params: false,
+            insert_final_newline: true,
+            trim_trailing_whitespace: true,
         }
     }
 }
@@ -35,8 +41,26 @@ pub fn format_file(file: &File, opts: &FormatOptions, dialect: &dyn Dialect) -> 
         format_stmt(stmt, &mut out, opts, dialect, 0, &mut first, &mut prev_was_blank);
     }
 
-    if !out.ends_with('\n') && !out.is_empty() {
-        out.push('\n');
+    if opts.trim_trailing_whitespace {
+        let mut trimmed = String::with_capacity(out.len());
+        for line in out.lines() {
+            trimmed.push_str(line.trim_end());
+            trimmed.push('\n');
+        }
+        if !out.ends_with('\n') {
+            trimmed.truncate(trimmed.trim_end_matches('\n').len());
+        }
+        out.clear();
+        out.push_str(&trimmed);
+    }
+
+    if opts.insert_final_newline {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+    } else {
+        let trimmed_len = out.trim_end_matches('\n').len();
+        out.truncate(trimmed_len);
     }
     out
 }

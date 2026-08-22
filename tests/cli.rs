@@ -236,3 +236,145 @@ fn spicefmt_toml_dialect_override_changes_format_style() {
     assert!(out.contains("r=1k"), "got {out}");
     assert!(!out.contains("r = 1k"), "got {out}");
 }
+
+// ---------- editorconfig ----------
+
+#[test]
+fn editorconfig_max_line_length_wraps() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".editorconfig"),
+        "root = true\n[*.sp]\nmax_line_length = 40\n",
+    )
+    .unwrap();
+    let f = dir.path().join("a.sp");
+    std::fs::write(&f, "M1 n1 n2 n3 n4 pch w=1u l=1u ad=1p as=1p pd=1u ps=1u nrd=1 nrs=1\n").unwrap();
+    let p = f.to_string_lossy().to_string();
+    let (out, _, _) = run(&[p.as_str()], None);
+    assert!(out.lines().all(|l| l.len() <= 40), "got {out}");
+    assert!(out.contains('+'), "should wrap: {out}");
+}
+
+#[test]
+fn editorconfig_insert_final_newline_false_drops_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".editorconfig"),
+        "[*.sp]\ninsert_final_newline = false\n",
+    )
+    .unwrap();
+    let f = dir.path().join("a.sp");
+    std::fs::write(&f, ".param w = 1u\n").unwrap();
+    let p = f.to_string_lossy().to_string();
+    let (out, _, _) = run(&[p.as_str()], None);
+    assert_eq!(out, ".param w = 1u");
+}
+
+#[test]
+fn spicefmt_toml_beats_editorconfig() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("spicefmt.toml"), "max_width = 80\n").unwrap();
+    std::fs::write(dir.path().join(".editorconfig"), "[*]\nmax_line_length = 40\n").unwrap();
+    // 60 chars: fits at 80, wraps at 40
+    let line = format!("R1 {} {} 1k\n", "n".repeat(20), "m".repeat(20));
+    let f = dir.path().join("a.sp");
+    std::fs::write(&f, &line).unwrap();
+    let p = f.to_string_lossy().to_string();
+    let (out, _, _) = run(&[p.as_str()], None);
+    assert_eq!(out, line, "60-char line must survive at max_width 80");
+}
+
+// ---------- enhancement requests from pg-grid-netlist-gen ----------
+
+const CONTROL_DECK: &str = "* control block repro\n\
+.param vddr=1.2 vssr=0\n\
+.control\nrun\n\
+let PG_VDD = vddr\n\
+let PG_VSS = vssr\n\
+let PG_LVL_50PCT = PG_VSS + (PG_VDD - PG_VSS)*0.5\n\
+let pg_t = $&pg_insertion\n\
+meas tran T1 WHEN v(CLK_LEAF)=$&PG_LVL_50PCT RISE=5\n\
+meas tran T2 WHEN v(CLK_LEAF)=$&PG_LVL_50PCT RISE=6\n\
+meas tran NOBS AVG v(nobs)\n\
+.endc\n\
+B1 nobs 0 V={vddr}\n\
+M1 dangling g 0 0 nch w=1u\n\
+.end\n";
+
+#[test]
+fn control_block_interior_is_not_parsed_as_netlist_cards() {
+    let (out, _, code) = run(&["--lint", "--dialect", "ngspice"], Some(CONTROL_DECK));
+    assert_eq!(code, 0);
+    assert!(!out.contains("duplicate-instance"), "got {out}");
+    assert!(!out.contains("PG_VDD"), "control vectors must not float: {out}");
+    assert!(!out.contains("nobs"), "measurement-consumed node must not float: {out}");
+    // genuine device-pin findings still fire
+    assert!(out.contains("'dangling'"), "got {out}");
+}
+
+#[test]
+fn measure_referenced_node_outside_control_is_observed() {
+    let input = ".tran 1n 10n\n.meas tran avg_v AVG v(vmon)\nB1 vmon 0 V=1\n";
+    let (out, _, code) = run(&["--lint"], Some(input));
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("floating"), "{out}");
+}
+
+#[test]
+fn summary_format_counts_by_severity_and_code() {
+    let input = "R1 a b 1k\nR1 c d 2k\nX1 p q missing\n";
+    let (out, _, code) = run(&["--lint", "--format", "summary"], Some(input));
+    assert_eq!(code, 1);
+    let dup: usize = out.lines().find(|l| l.contains("duplicate-instance")).unwrap()
+        .split_whitespace().next().unwrap().parse().unwrap();
+    assert_eq!(dup, 1);
+    assert!(out.contains("finding(s)"), "totals line missing: {out}");
+}
+
+#[test]
+fn error_on_warning_fails_on_warnings() {
+    let input = "M1 a b c d nch w=1u\n"; // a..d all float
+    let (_, _, code) = run(&["--lint", "--error-on", "warning"], Some(input));
+    assert_eq!(code, 1);
+    let (_, _, code) = run(&["--lint"], Some(input));
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn max_warnings_gate() {
+    let input = "M1 a b c d nch w=1u\n"; // 4 warnings
+    let (_, _, code) = run(&["--lint", "--max-warnings", "3"], Some(input));
+    assert_eq!(code, 1);
+    let (_, _, code) = run(&["--lint", "--max-warnings", "4"], Some(input));
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn suppressed_code_hides_from_details_stays_in_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("spicefmt.toml"),
+        "[lint]\nsuppress = [\"dangling-rc-endpoint\"]\n",
+    )
+    .unwrap();
+    let f = dir.path().join("a.sp");
+    std::fs::write(&f, "R1 lonely b 1k\nR2 b other 2k\n").unwrap();
+    let p = f.to_string_lossy().to_string();
+    let (human, _, _) = run(&["--lint", &p], None);
+    assert!(!human.contains("lonely"), "suppressed finding leaked: {human}");
+    let (summary, _, _) = run(&["--lint", "--format", "summary", p.as_str()], None);
+    let line = summary.lines().find(|l| l.contains("dangling-rc-endpoint")).expect("in summary");
+    assert!(line.contains("[suppressed]"), "{summary}");
+}
+
+#[test]
+fn json_records_carry_schema_version() {
+    let (out, _, _) = run(
+        &["--lint", "--format", "json"],
+        Some("X1 a b missing\n"),
+    );
+    for line in out.lines().filter(|l| !l.is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["schema_version"], 1);
+    }
+}

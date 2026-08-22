@@ -25,6 +25,10 @@ pub enum LintReportFormat {
     Sarif,
 }
 
+/// Bumped on any breaking change to the JSONL record shape; consumers use
+/// it to detect format drift instead of silently mis-parsing.
+pub const LINT_JSON_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Serialize)]
 struct DiagnosticJson<'a> {
     path: &'a str,
@@ -33,6 +37,7 @@ struct DiagnosticJson<'a> {
     severity: &'a str,
     code: &'a str,
     message: &'a str,
+    schema_version: u32,
 }
 
 pub fn diagnostics_as_json(path: &str, diags: &[Diagnostic]) -> String {
@@ -45,6 +50,7 @@ pub fn diagnostics_as_json(path: &str, diags: &[Diagnostic]) -> String {
             severity: d.severity.as_str(),
             code: d.code,
             message: &d.message,
+            schema_version: LINT_JSON_SCHEMA_VERSION,
         };
         out.push_str(&serde_json::to_string(&rec).unwrap_or_default());
         out.push('\n');
@@ -233,11 +239,20 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
     // flagged as a likely typo.
     let mut node_spellings: HashMap<String, (String, usize)> = HashMap::new();
 
-    // instance-node mentions as written: (lowercase, original spelling, line)
-    let mut inst_node_mentions: Vec<(String, String, usize)> = Vec::new();
+    // instance-node mentions as written: (lowercase, original spelling, line,
+    // element type char, e.g. 'R'/'C' for passive-network classification)
+    let mut inst_node_mentions: Vec<(String, String, usize, char)> = Vec::new();
 
     // (ref_name, node_count, line)
     let mut xinsts: Vec<(String, usize, usize)> = Vec::new();
+
+    // Nodes referenced by measurements/probes/saves — semantically consumed
+    // even when nothing drives them.
+    let mut observed_nodes: HashSet<String> = HashSet::new();
+
+    // ngspice `.control` blocks contain simulator command language, not
+    // netlist cards; instance and node analysis must skip the interior.
+    let mut control_depth = 0usize;
 
     for (start, _, line_text) in logical_line_spans(input, dialect.as_ref()) {
         let trimmed = line_text.trim();
@@ -257,6 +272,37 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
             });
             continue;
         }
+
+        let mut directive_name: Option<String> = None;
+        if let Some(rest) = trimmed.strip_prefix('.') {
+            directive_name = Some(
+                rest.split(|c: char| !c.is_ascii_alphanumeric())
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase(),
+            );
+        }
+
+        match directive_name.as_deref() {
+            Some("control") => {
+                control_depth += 1;
+                collect_observed(&line_text, &mut observed_nodes);
+                continue;
+            }
+            Some("endc") => {
+                control_depth = control_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if control_depth > 0 {
+            // Command language (`let`, `meas`, `if`, ...): only measurement
+            // observation matters here, never netlist structure.
+            collect_observed(&line_text, &mut observed_nodes);
+            continue;
+        }
+
         match parse_logical_line(&line_text, dialect.as_ref()) {
             Stmt::Subckt(s) => {
                 if !s.name.is_empty() {
@@ -305,8 +351,7 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 let etype = inst.name.chars().next().map(|c| c.to_ascii_uppercase());
                 if etype == Some('.') {
                     continue;
-                }
-                // duplicate instance name within the same scope
+                }                // duplicate instance name within the same scope
                 let scope = scopes.last_mut().unwrap();
                 let key = inst.name.to_ascii_lowercase();
                 if let Some(prev) = scope.get(&key) {
@@ -326,7 +371,12 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
 
                 for n in &inst.nodes {
                     bump(&mut nodes, n, start);
-                    inst_node_mentions.push((n.to_ascii_lowercase(), n.clone(), start));
+                    inst_node_mentions.push((
+                        n.to_ascii_lowercase(),
+                        n.clone(),
+                        start,
+                        etype.unwrap_or('?'),
+                    ));
                     let lower = n.to_ascii_lowercase();
                     match node_spellings.get(&lower) {
                         Some((orig, first_line)) if orig != n => {
@@ -359,6 +409,9 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                         });
                     }
                 }
+            }
+            Stmt::Directive(d) if matches!(d.name.as_str(), "measure" | "meas" | "probe" | "print" | "plot" | "save") => {
+                collect_observed(&line_text, &mut observed_nodes);
             }
             _ => {}
         }
@@ -402,19 +455,35 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
         }
     }
 
-    for (lower, spelling, line) in &inst_node_mentions {
-        if is_ground(spelling) {
+    for (lower, spelling, line, etype) in &inst_node_mentions {
+        if is_ground(spelling) || observed_nodes.contains(lower) {
             continue;
         }
         if let Some(&(count, first_line)) = nodes.get(lower)
             && count == 1
             && first_line == *line
         {
+            // A lonely node on a passive element is the signature of an
+            // extracted RC/L network endpoint — triage it separately from a
+            // dangling device pin.
+            let (code, message) = if matches!(etype, 'R' | 'C' | 'L') {
+                (
+                    "dangling-rc-endpoint",
+                    format!(
+                        "node '{spelling}' terminates a passive network with no other connection"
+                    ),
+                )
+            } else {
+                (
+                    "floating-node",
+                    format!("node '{spelling}' is connected to only one element"),
+                )
+            };
             diags.push(Diagnostic {
                 range: line_range(*line as u32, spelling.len() as u32),
                 severity: Severity::Warning,
-                code: "floating-node",
-                message: format!("node '{spelling}' is connected to only one element"),
+                code,
+                message,
             });
         }
     }
@@ -431,6 +500,37 @@ fn bump(map: &mut HashMap<String, (usize, usize)>, node: &str, line: usize) {
             *l = (*l).min(line);
         })
         .or_insert((1, line));
+}
+
+/// Pull `v(node)` / `v(n1,n2)` / `i(vsrc)` references out of a measurement,
+/// probe, save, or `.control` command line. Anything observed by an
+/// analysis statement is not floating, no matter how it is driven.
+fn collect_observed(line: &str, out: &mut HashSet<String>) {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'v' && bytes[i + 1] == b'(' {
+            let mut j = i + 2;
+            let start = j;
+            while j < bytes.len() && bytes[j] != b')' {
+                j += 1;
+            }
+            for token in lower[start..j.min(lower.len())].split(',') {
+                let t = token.trim();
+                if !t.is_empty()
+                    && t.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || "[]().$_!#<>|*\\".contains(c)
+                    })
+                {
+                    out.insert(t.to_string());
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Collect every subckt visible from `path` — including the file itself and
@@ -569,8 +669,13 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
     fn flags_floating_node_but_not_ground() {
         let input = "* title\nR1 a b 1k\nR2 c b 2k\n";
         let diags = lint(input);
-        let floats: Vec<_> = diags.iter().filter(|d| d.code == "floating-node").collect();
-        assert_eq!(floats.len(), 2); // 'a' and 'c'
+        // 'a' and 'c' terminate passive networks -> distinct code
+        let rcs: Vec<_> = diags.iter().filter(|d| d.code == "dangling-rc-endpoint").collect();
+        assert_eq!(rcs.len(), 2);
+        // a device pin would still be floating-node
+        let input = "* title\nM1 a b c d nch\n";
+        let diags = lint(input);
+        assert!(diags.iter().any(|d| d.code == "floating-node"));
     }
 
     #[test]
@@ -584,15 +689,16 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
     fn flags_duplicate_instance_name_in_scope() {
         let input = "R1 a b 1k\nR1 c d 2k\n";
         let diags = lint(input);
-        // duplicate reported on the second occurrence; a/b/c/d each float
+        // duplicate reported on the second occurrence; a/b/c/d all terminate
+        // passive networks
         assert_eq!(
             codes(&diags),
             vec![
-                "floating-node",
-                "floating-node",
+                "dangling-rc-endpoint",
+                "dangling-rc-endpoint",
                 "duplicate-instance",
-                "floating-node",
-                "floating-node"
+                "dangling-rc-endpoint",
+                "dangling-rc-endpoint"
             ]
         );
         assert_eq!(

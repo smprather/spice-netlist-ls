@@ -24,3 +24,6 @@ manuals/
 
 # vendored/offline scratch
 /sqlite/
+
+# bundled binaries for the python wheel (build artifacts, not source)
+/src/spice_netlist_ls/bin/

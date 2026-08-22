@@ -4,16 +4,39 @@
 
 use clap::{Parser, ValueEnum};
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+/// What severity should fail `--lint`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ErrorOn {
+    /// Exit non-zero only when error-severity findings exist.
+    #[default]
+    Error,
+    /// Exit non-zero on any error *or* warning finding.
+    Warning,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum LintFormat {
+    /// `path:line:col: severity [code]: message` — stable, grep-friendly.
     #[default]
     Human,
+    /// Newline-delimited JSON: **one object per line**, not an array —
+    /// stream-processable, and one malformed line costs one finding rather
+    /// than the whole report.
     Json,
+    /// Static Analysis Results Interchange Format; GitLab/GitHub Enterprise
+    /// merge-request UIs render this natively without any plugin.
     Sarif,
+    /// Counts by (severity, code), descending, plus totals. Suppressed codes
+    /// still appear here so acknowledgements stay visible.
+    Summary,
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "spicefmt", about = "Highly opinionated SPICE formatter — HSPICE golden, dialect-extensible")]
+#[command(
+    name = "spicefmt",
+    version,
+    about = "Opinionated SPICE netlist formatter and linter — dialect-extensible (hspice, ngspice, spectre, ltspice)"
+)]
 #[command(group(
     clap::ArgGroup::new("mode")
         .args(["check", "write", "lint", "print_dialect"])
@@ -35,7 +58,7 @@ pub struct Args {
     #[arg(long, help = "Detect and print dialect per input, no formatting")]
     pub print_dialect: bool,
 
-    #[arg(long, help = "Lint only: print diagnostics, exit 1 on error-severity findings")]
+    #[arg(long, help = "Lint only: print diagnostics, exit code governed by --error-on/--max-warnings")]
     pub lint: bool,
 
     #[arg(
@@ -47,6 +70,24 @@ pub struct Args {
         help = "Diagnostic output format (used with --lint)"
     )]
     pub format: LintFormat,
+
+    #[arg(
+        long,
+        value_name = "SEVERITY",
+        value_enum,
+        default_value_t = ErrorOn::Error,
+        requires = "lint",
+        help = "Lowest severity that fails the lint run"
+    )]
+    pub error_on: ErrorOn,
+
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "lint",
+        help = "Fail when more than N (non-suppressed) warnings are reported"
+    )]
+    pub max_warnings: Option<usize>,
 
     #[arg(long, help = "Print dialect list and exit")]
     pub list_dialects: bool,

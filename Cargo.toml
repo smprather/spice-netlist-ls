@@ -1,6 +1,6 @@
 [package]
 name = "spice-netlist-ls"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Highly opinionated SPICE formatter and language server — HSPICE golden reference, dialect-extensible"
 license = "MIT"
@@ -54,6 +54,7 @@ serde_json = "1"
 anyhow = "1"
 toml = "0.8"
 directories = "6"
+globset = "0.4"
 
 [dev-dependencies]
 insta = { version = "1.38", features = ["toml"] }
