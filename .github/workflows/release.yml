@@ -103,6 +103,8 @@ jobs:
   host:
     needs: [plan, build-local-artifacts]
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: Install dist
@@ -110,7 +112,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
-          path: artifacts
+          # dist host searches target/distrib for local artifacts
+          path: target/distrib
           merge-multiple: true
       - name: Publish git tag
         if: needs.plan.outputs.publishing
