@@ -30,7 +30,7 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      val: ${{ steps.plan.outputs.manifest }}
+      val: ${{ steps.plan.outputs.val }}
       tag: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
       tag-flag: ${{ !startsWith(github.ref, 'refs/tags/') && format('--tag={0}', inputs.tag) || '' }}
       publishing: ${{ startsWith(github.ref, 'refs/tags/') }}
