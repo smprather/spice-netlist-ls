@@ -209,8 +209,8 @@ fn line_range(line: u32, len: u32) -> LintRange {
 
 /// Node names that mean ground and never count as floating.
 fn is_ground(node: &str) -> bool {
-    let n = node.trim_end_matches('!').to_ascii_lowercase();
-    matches!(n.as_str(), "0" | "gnd" | "ground")
+    let n = node.trim_end_matches('!');
+    n == "0" || n.eq_ignore_ascii_case("gnd") || n.eq_ignore_ascii_case("ground")
 }
 
 #[derive(Default)]
@@ -370,14 +370,8 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 }
 
                 for n in &inst.nodes {
-                    bump(&mut nodes, n, start);
-                    inst_node_mentions.push((
-                        n.to_ascii_lowercase(),
-                        n.clone(),
-                        start,
-                        etype.unwrap_or('?'),
-                    ));
                     let lower = n.to_ascii_lowercase();
+                    bump(&mut nodes, &lower, start);
                     match node_spellings.get(&lower) {
                         Some((orig, first_line)) if orig != n => {
                             diags.push(Diagnostic {
@@ -391,10 +385,12 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                                 ),
                             });
                         }
-                        _ => {
-                            node_spellings.entry(lower).or_insert_with(|| (n.clone(), start));
+                        Some(_) => {}
+                        None => {
+                            node_spellings.insert(lower.clone(), (n.clone(), start));
                         }
                     }
+                    inst_node_mentions.push((lower, n.clone(), start, etype.unwrap_or('?')));
                 }
 
                 if etype == Some('X') {
@@ -493,13 +489,14 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
     diags
 }
 
-fn bump(map: &mut HashMap<String, (usize, usize)>, node: &str, line: usize) {
-    map.entry(node.to_ascii_lowercase())
-        .and_modify(|(c, l)| {
-            *c += 1;
-            *l = (*l).min(line);
-        })
-        .or_insert((1, line));
+/// Increment the mention count for an already-lowercased node name.
+fn bump(map: &mut HashMap<String, (usize, usize)>, lower: &str, line: usize) {
+    if let Some(entry) = map.get_mut(lower) {
+        entry.0 += 1;
+        entry.1 = entry.1.min(line);
+    } else {
+        map.insert(lower.to_string(), (1, line));
+    }
 }
 
 /// Pull `v(node)` / `v(n1,n2)` / `i(vsrc)` references out of a measurement,
@@ -543,19 +540,6 @@ pub fn external_subckts(path: &Path, dialect: &Arc<dyn Dialect>) -> HashMap<Stri
     out
 }
 
-/// Subckt name -> port count for all `.subckt` definitions in `text`.
-fn subckt_port_counts(text: &str, dialect: &Arc<dyn Dialect>) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
-    for (_, _, line) in logical_line_spans(text, dialect.as_ref()) {
-        if let Stmt::Subckt(s) = parse_logical_line(&line, dialect.as_ref())
-            && !s.name.is_empty()
-        {
-            out.push((s.name.to_ascii_lowercase(), s.ports.len()));
-        }
-    }
-    out
-}
-
 fn walk(
     path: &Path,
     dialect: &Arc<dyn Dialect>,
@@ -569,10 +553,13 @@ fn walk(
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    for (name, ports) in subckt_port_counts(&text, dialect) {
+    // One pass per file: subckt defs and include paths together, with a
+    // prefix filter so device cards never reach the full parser.
+    let (defs, includes) = crate::parser::scan_subckt_defs_and_includes(&text, dialect.as_ref());
+    for (name, ports) in defs {
         out.insert(name, Some(ports));
     }
-    for inc in crate::parser::include_paths(&text, dialect.as_ref()) {
+    for inc in includes {
         let inc_path = if Path::new(&inc).is_absolute() {
             PathBuf::from(&inc)
         } else if let Some(parent) = path.parent() {

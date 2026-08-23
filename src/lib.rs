@@ -12,3 +12,8 @@ pub use dialect::{Dialect, DialectKind, get_dialect};
 pub use formatter::{FormatOptions, format_file, format_str};
 pub use ir::{File, Stmt};
 pub use parser::parse_str;
+
+/// Case-insensitive ASCII prefix check without allocating an uppercased copy.
+pub(crate) fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix)
+}

@@ -1,4 +1,5 @@
 use crate::dialect::DialectKind;
+use crate::starts_with_ci;
 
 /// Per-dialect evidence tallies from a netlist scan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,32 +75,30 @@ pub fn score_dialect(input: &str) -> DialectScores {
         if trimmed.is_empty() || trimmed.starts_with('*') {
             continue;
         }
-        let lower = trimmed.to_ascii_lowercase();
 
-        if lower.starts_with("//") {
+        if starts_with_ci(trimmed, "//") {
             if slashes < SPECTRE_SYNTAX_CAP {
                 s.spectre += DECISIVE;
                 slashes += 1;
             }
             continue;
         }
-        if lower.starts_with('#') {
+        if trimmed.starts_with('#') {
             s.spectre += 1;
             continue;
         }
 
         // Continuation lines contribute inline-comment evidence only.
         let code = trimmed.strip_prefix('+').map(str::trim).unwrap_or(trimmed);
-        let code_lower = code.to_ascii_lowercase();
 
-        if code_lower.starts_with("simulator lang") {
+        if starts_with_ci(code, "simulator lang") {
             s.spectre += DECISIVE;
         }
-        if code_lower.starts_with("ahdl_include") {
+        if starts_with_ci(code, "ahdl_include") {
             s.spectre += DECISIVE;
         }
         for kw in ["section ", "endsection ", "statistics "] {
-            if code_lower.starts_with(kw) {
+            if starts_with_ci(code, kw) {
                 s.spectre += DECISIVE;
                 break;
             }
@@ -107,28 +106,37 @@ pub fn score_dialect(input: &str) -> DialectScores {
         // Bare `parameters`/`variables`/`include "..."` could be title lines
         // in SPICE dialects, so they stay weak evidence.
         for kw in ["parameters ", "variables ", "include \""] {
-            if code_lower.starts_with(kw) {
+            if starts_with_ci(code, kw) {
                 s.spectre += 2;
                 break;
             }
         }
 
-        if let Some(rest) = code_lower.strip_prefix('.') {
+        if let Some(rest) = code.strip_prefix('.') {
             let word = rest.split([',', ' ', '\t']).next().unwrap_or("");
-            match word {
-                // ngspice-exclusive
-                "control" | "csparam" => s.ngspice += DECISIVE,
-                "endc" => s.ngspice += 1,
-                "options" | "meas" => s.ngspice += 1,
+            // ngspice-exclusive
+            if word.eq_ignore_ascii_case("control") || word.eq_ignore_ascii_case("csparam") {
+                s.ngspice += DECISIVE;
+            } else if word.eq_ignore_ascii_case("endc")
+                || word.eq_ignore_ascii_case("options")
+                || word.eq_ignore_ascii_case("meas")
+            {
+                s.ngspice += 1;
+            } else if word.eq_ignore_ascii_case("alter")
+                || word.eq_ignore_ascii_case("protect")
+                || word.eq_ignore_ascii_case("unprotect")
+                || word.eq_ignore_ascii_case("data")
+                || word.eq_ignore_ascii_case("dalo")
+                || word.eq_ignore_ascii_case("graph")
+            {
                 // hspice-exclusive (among supported dialects)
-                "alter" | "protect" | "unprotect" | "data" | "dalo" | "graph" => {
-                    s.hspice += DECISIVE;
-                }
+                s.hspice += DECISIVE;
+            } else if word.eq_ignore_ascii_case("measure") || word.eq_ignore_ascii_case("option") {
                 // shared flavor: ngspice accepts .measure/.option too
-                "measure" | "option" => s.hspice += 1,
+                s.hspice += 1;
+            } else if word.eq_ignore_ascii_case("step") || word.eq_ignore_ascii_case("backanno") {
                 // ltspice-exclusive (.step is also PSpice, unsupported here)
-                "step" | "backanno" => s.ltspice += DECISIVE,
-                _ => {}
+                s.ltspice += DECISIVE;
             }
         } else if has_leading_paren_nodes(code) && parens < SPECTRE_SYNTAX_CAP {
             s.spectre += DECISIVE;
@@ -148,8 +156,7 @@ pub fn score_dialect(input: &str) -> DialectScores {
             semis += 1;
         }
         // `$` inline-comment evidence must not fire on `$&` derefs.
-        let no_meas_ref = code.replace("$&", "  ");
-        if dollars < INLINE_CAP && has_unquoted(&no_meas_ref, "$") {
+        if dollars < INLINE_CAP && has_unquoted_dollar(code) {
             s.hspice += 1;
             dollars += 1;
         }
@@ -171,25 +178,49 @@ fn has_leading_paren_nodes(code: &str) -> bool {
     }
 }
 
-/// True if `needle` occurs outside single/double-quoted spans.
+/// True if ASCII `needle` occurs outside single/double-quoted spans.
+/// Byte-oriented: UTF-8 continuation bytes are >= 0x80 and can never equal an
+/// ASCII quote or needle byte, so scanning bytes is exact, not an approximation.
 fn has_unquoted(code: &str, needle: &str) -> bool {
-    let chars: Vec<char> = code.chars().collect();
-    let needle: Vec<char> = needle.chars().collect();
+    let bytes = code.as_bytes();
+    let nb = needle.as_bytes();
     let mut in_single = false;
     let mut in_double = false;
-    for i in 0..chars.len() {
-        let ch = chars[i];
-        if ch == '\'' && !in_double {
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' && !in_double {
             in_single = !in_single;
-            continue;
-        }
-        if ch == '"' && !in_single {
+        } else if b == b'"' && !in_single {
             in_double = !in_double;
-            continue;
-        }
-        if !in_single && !in_double && chars[i..].starts_with(&needle[..]) {
+        } else if !in_single && !in_double && b == nb[0] && bytes[i..].starts_with(nb) {
             return true;
         }
+        i += 1;
+    }
+    false
+}
+
+/// Unquoted `$` that is not part of an ngspice `$&` measurement dereference.
+fn has_unquoted_dollar(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+        } else if b == b'"' && !in_single {
+            in_double = !in_double;
+        } else if !in_single && !in_double && b == b'$' {
+            if bytes.get(i + 1) == Some(&b'&') {
+                i += 1;
+            } else {
+                return true;
+            }
+        }
+        i += 1;
     }
     false
 }

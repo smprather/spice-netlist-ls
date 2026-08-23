@@ -29,19 +29,28 @@ impl Default for FormatOptions {
 pub fn format_str(input: &str, opts: &FormatOptions) -> String {
     let dialect = crate::dialect::get_dialect(opts.dialect);
     let file = crate::parser::parse_str(input, dialect.clone());
-    format_file(&file, opts, dialect.as_ref())
+    let mut out = String::with_capacity(input.len() + input.len() / 8);
+    format_into(&file, &mut out, opts, dialect.as_ref());
+    out
 }
 
 pub fn format_file(file: &File, opts: &FormatOptions, dialect: &dyn Dialect) -> String {
     let mut out = String::new();
+    format_into(file, &mut out, opts, dialect);
+    out
+}
+
+fn format_into(file: &File, out: &mut String, opts: &FormatOptions, dialect: &dyn Dialect) {
     let mut first = true;
     let mut prev_was_blank = false;
 
     for stmt in &file.stmts {
-        format_stmt(stmt, &mut out, opts, dialect, 0, &mut first, &mut prev_was_blank);
+        format_stmt(stmt, out, opts, dialect, 0, &mut first, &mut prev_was_blank);
     }
 
-    if opts.trim_trailing_whitespace {
+    // The emitter only produces trailing whitespace via exotic input tokens,
+    // so probe first; the rebuild is a full copy and skips in the common case.
+    if opts.trim_trailing_whitespace && has_trailing_whitespace(out) {
         let mut trimmed = String::with_capacity(out.len());
         for line in out.lines() {
             trimmed.push_str(line.trim_end());
@@ -62,7 +71,10 @@ pub fn format_file(file: &File, opts: &FormatOptions, dialect: &dyn Dialect) -> 
         let trimmed_len = out.trim_end_matches('\n').len();
         out.truncate(trimmed_len);
     }
-    out
+}
+
+fn has_trailing_whitespace(s: &str) -> bool {
+    s.split('\n').any(|line| line != line.trim_end())
 }
 
 fn format_stmt(
