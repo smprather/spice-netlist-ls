@@ -104,22 +104,33 @@ jobs:
 
   host:
     needs: [plan, build-local-artifacts]
+    # dist >= 0.25's host steps (create/upload/release) only manage axodotdev
+    # hosting; for plain GitHub Releases the generated workflow creates the
+    # release itself via `gh release create`. We do the same.
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install dist
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.28.0/cargo-dist-installer.sh | sh
       - uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
-          # dist host searches target/distrib for local artifacts
-          path: target/distrib
+          path: artifacts
           merge-multiple: true
-      - name: Publish git tag
-        if: needs.plan.outputs.publishing
+      - name: Drop granular manifests
+        run: rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
+      - name: Create GitHub Release
         env:
           TAG: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
+          PRERELEASE_FLAG: "${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_TITLE: "${{ fromJson(needs.plan.outputs.val).announcement_title }}"
+          ANNOUNCEMENT_BODY: "${{ fromJson(needs.plan.outputs.val).announcement_github_body }}"
+          RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          cargo dist host --tag="$TAG" --steps=upload --steps=release
+          # Write/read notes via file to avoid quoting issues
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          gh release create "$TAG" \
+            --target "$RELEASE_COMMIT" \
+            $PRERELEASE_FLAG \
+            --title "$ANNOUNCEMENT_TITLE" \
+            --notes-file "$RUNNER_TEMP/notes.txt" \
+            artifacts/*
