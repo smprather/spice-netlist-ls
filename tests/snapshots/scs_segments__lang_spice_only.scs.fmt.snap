@@ -14,6 +14,6 @@ Mp y a vdd vdd pch w=2u
 .ends inv
 
 Xinv in out vdd gnd inv
-Cload out gnd 10f
+Cload out gnd 10f ; load cap — `;` is a SPICE inline comment
 Vdd vdd gnd 1.2
 Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)

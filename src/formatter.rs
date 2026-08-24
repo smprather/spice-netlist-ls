@@ -28,10 +28,34 @@ impl Default for FormatOptions {
 }
 
 pub fn format_str(input: &str, opts: &FormatOptions) -> String {
-    let dialect = crate::dialect::get_dialect(opts.dialect);
-    let file = crate::parser::parse_str(input, dialect.clone());
+    let secs = crate::segments::segments(input, opts.dialect);
+
+    // Fast path: no `simulator lang=` directive anywhere → today's code path,
+    // unchanged, guaranteeing byte-identical output for plain decks.
+    if secs.len() == 1 && secs[0].header.is_none() {
+        let dialect = crate::dialect::get_dialect(opts.dialect);
+        let file = crate::parser::parse_str(input, dialect.clone());
+        let mut out = String::with_capacity(input.len() + input.len() / 8);
+        format_into(&file, &mut out, opts, dialect.as_ref());
+        return out;
+    }
+
+    // Sectioned path: emit each header verbatim, then its body under the
+    // section's dialect. The trailer (trim_trailing_whitespace /
+    // insert_final_newline) runs once over the whole output, not per
+    // section, so we don't insert/drop a newline at each segment boundary.
     let mut out = String::with_capacity(input.len() + input.len() / 8);
-    format_into(&file, &mut out, opts, dialect.as_ref());
+    for sec in &secs {
+        if let Some(h) = sec.header {
+            out.push_str(h);
+            out.push('\n');
+        }
+        let sub_opts = FormatOptions { dialect: sec.dialect, ..opts.clone() };
+        let dialect = crate::dialect::get_dialect(sec.dialect);
+        let file = crate::parser::parse_str(sec.body, dialect.clone());
+        emit_statements(&file, &mut out, &sub_opts, dialect.as_ref());
+    }
+    apply_trailer(&mut out, opts);
     out
 }
 
@@ -42,13 +66,25 @@ pub fn format_file(file: &File, opts: &FormatOptions, dialect: &dyn Dialect) -> 
 }
 
 fn format_into(file: &File, out: &mut String, opts: &FormatOptions, dialect: &dyn Dialect) {
+    emit_statements(file, out, opts, dialect);
+    apply_trailer(out, opts);
+}
+
+/// Emit every statement of `file` into `out` without applying the trailer
+/// (trim/final-newline). The sectioned formatter calls this per section and
+/// runs the trailer once at the end.
+fn emit_statements(file: &File, out: &mut String, opts: &FormatOptions, dialect: &dyn Dialect) {
     let mut first = true;
     let mut prev_was_blank = false;
-
     for stmt in &file.stmts {
         format_stmt(stmt, out, opts, dialect, 0, &mut first, &mut prev_was_blank);
     }
+}
 
+/// Apply `trim_trailing_whitespace` and `insert_final_newline` once over the
+/// whole output. Running this per section would insert/drop a newline at each
+/// segment boundary; the sectioned formatter calls it only at the end.
+fn apply_trailer(out: &mut String, opts: &FormatOptions) {
     // The emitter only produces trailing whitespace via exotic input tokens,
     // so probe first; the rebuild is a full copy and skips in the common case.
     if opts.trim_trailing_whitespace && has_trailing_whitespace(out) {
