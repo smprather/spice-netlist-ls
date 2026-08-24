@@ -634,10 +634,48 @@ fn collect_observed(line: &str, nodes: &mut NodeTable) {
 /// Collect every subckt visible from `path` — including the file itself and
 /// everything reachable via `.include`/`.inc`/`.lib` — with its port count,
 /// so arity checks work against PDK/library cells. Cycles guarded.
+///
+/// If `path` contains `simulator lang=` directives, the file is segmented and
+/// each section's includes are walked under that section's dialect, unioning
+/// the results (subckts from a spice-section include are visible to a
+/// spectre-section instance and vice versa). Plain files take the single-
+/// dialect fast path unchanged.
 pub fn external_subckts(path: &Path, dialect: &Arc<dyn Dialect>) -> HashMap<String, Option<usize>> {
     let mut out = HashMap::new();
     let mut visited = HashSet::new();
-    walk(path, dialect, &mut visited, &mut out);
+
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    let fallback = dialect.kind();
+    let secs = crate::segments::segments(&text, fallback);
+
+    // Fast path: no `simulator lang=` → single-dialect walk, unchanged.
+    if secs.len() == 1 && secs[0].header.is_none() {
+        walk(path, dialect, &mut visited, &mut out);
+        return out;
+    }
+
+    // Sectioned: walk includes per section under that section's dialect. The
+    // root file's own per-section defs are picked up by `cross_defs` inside
+    // `lint_str`; here we only need the *external* (include) defs, but we
+    // still seed the visited set with the root so we don't re-walk it.
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    visited.insert(canonical);
+    for sec in &secs {
+        let sub_dialect = crate::dialect::get_dialect(sec.dialect);
+        let (_, includes) = crate::parser::scan_subckt_defs_and_includes(sec.body, sub_dialect.as_ref());
+        for inc in includes {
+            let inc_path = if Path::new(&inc).is_absolute() {
+                PathBuf::from(&inc)
+            } else if let Some(parent) = path.parent() {
+                parent.join(&inc)
+            } else {
+                continue;
+            };
+            walk(&inc_path, &sub_dialect, &mut visited, &mut out);
+        }
+    }
     out
 }
 

@@ -3,7 +3,6 @@ use lsp_types::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -83,8 +82,13 @@ fn text_for(uri: &Uri, docs: &HashMap<Uri, String>) -> String {
 fn publish_diagnostics(connection: &Connection, uri: &Uri, text: &str) -> anyhow::Result<()> {
     let dialect = spice_netlist_ls::get_dialect(spice_netlist_ls::detect_dialect(text));
     let path = PathBuf::from(uri.path().as_str());
+    // `external_subckts` is section-aware: if the file contains
+    // `simulator lang=` directives, includes are walked per section under
+    // that section's dialect and the results unioned.
     let external = spice_netlist_ls::linter::external_subckts(&path, &dialect);
     let opts = spice_netlist_ls::linter::LintOptions { external_subckts: external };
+    // `lint_str` is section-aware: it segments the file and offsets
+    // diagnostic line numbers to global coordinates internally.
     let diags = spice_netlist_ls::linter::lint_str(text, &dialect, &opts)
         .into_iter()
         .map(|d| Diagnostic {
@@ -154,16 +158,27 @@ fn handle_request(
             let uri = params.text_document_position_params.text_document.uri;
             let path = PathBuf::from(uri.path().as_str());
             let text = text_for(&uri, docs);
-            let dialect = spice_netlist_ls::get_dialect(spice_netlist_ls::detect_dialect(&text));
-            let location = spice_netlist_ls::parser::subckt_ref_at_line(
-                &text,
-                params.text_document_position_params.position.line as usize,
-                dialect.as_ref(),
-            )
-            .and_then(|name| {
-                let mut visited = HashSet::new();
-                find_subckt_def(&path, &text, &name, &dialect, &mut visited)
-            });
+            let line = params.text_document_position_params.position.line as usize;
+            let fallback = spice_netlist_ls::detect_dialect(&text);
+            let secs = spice_netlist_ls::segments::segments(&text, fallback);
+            // Find which section `line` falls in; parse *that section* under
+            // its dialect to extract the X-instance ref name. The def search
+            // then covers the whole file (all sections) + includes.
+            let location = spice_netlist_ls::segments::section_index_at_line(&secs, line)
+                .and_then(|i| {
+                    let sec = &secs[i];
+                    let sub_dialect = spice_netlist_ls::get_dialect(sec.dialect);
+                    let within = line - sec.line_offset;
+                    spice_netlist_ls::parser::subckt_ref_at_line(
+                        sec.body,
+                        within,
+                        sub_dialect.as_ref(),
+                    )
+                })
+                .and_then(|name| {
+                    let mut visited = HashSet::new();
+                    find_subckt_def(&path, &name, &secs, &mut visited)
+                });
             let resp = Response {
                 id,
                 result: Some(serde_json::to_value(location)?),
@@ -186,35 +201,54 @@ fn handle_request(
 /// Find a subckt definition in `text`, following `.include`/`.inc`/`.lib`
 /// directives transitively (relative paths resolve against the including
 /// file's directory; cycles guarded via `visited`).
+///
+/// Section-aware: `secs` is the segmentation of the file (the caller segments
+/// once at the root; recursive calls for includes segment their own text).
+/// Each section's defs are scanned under that section's dialect; each
+/// section's includes are walked under that section's dialect. The def line
+/// is reported in global (whole-file) coordinates.
 fn find_subckt_def(
     path: &Path,
-    text: &str,
     name: &str,
-    dialect: &Arc<dyn spice_netlist_ls::Dialect>,
+    secs: &[spice_netlist_ls::segments::Section<'_>],
     visited: &mut HashSet<PathBuf>,
 ) -> Option<Location> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(canonical) {
         return None;
     }
-    if let Some((_, line)) = spice_netlist_ls::parser::subckt_definitions(text, dialect.as_ref())
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-    {
-        return Some(Location {
-            uri: Uri::from_str(&format!("file://{}", path.display())).ok()?,
-            range: Range::new(Position::new(*line as u32, 0), Position::new(*line as u32, 0)),
-        });
+    // Search every section's defs under its own dialect. The def line is
+    // offset to global coordinates.
+    for sec in secs {
+        let sub_dialect = spice_netlist_ls::get_dialect(sec.dialect);
+        if let Some((_, line)) = spice_netlist_ls::parser::subckt_definitions(sec.body, sub_dialect.as_ref())
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
+            return Some(Location {
+                uri: Uri::from_str(&format!("file://{}", path.display())).ok()?,
+                range: Range::new(
+                    Position::new((sec.line_offset + line) as u32, 0),
+                    Position::new((sec.line_offset + line) as u32, 0),
+                ),
+            });
+        }
     }
-    for inc in spice_netlist_ls::parser::include_paths(text, dialect.as_ref()) {
-        let inc_path = if Path::new(&inc).is_absolute() {
-            PathBuf::from(&inc)
-        } else {
-            path.parent()?.join(&inc)
-        };
-        if let Ok(inc_text) = std::fs::read_to_string(&inc_path) {
-            if let Some(loc) = find_subckt_def(&inc_path, &inc_text, name, dialect, visited) {
-                return Some(loc);
+    // Walk includes per section under that section's dialect.
+    for sec in secs {
+        let sub_dialect = spice_netlist_ls::get_dialect(sec.dialect);
+        for inc in spice_netlist_ls::parser::include_paths(sec.body, sub_dialect.as_ref()) {
+            let inc_path = if Path::new(&inc).is_absolute() {
+                PathBuf::from(&inc)
+            } else {
+                path.parent()?.join(&inc)
+            };
+            if let Ok(inc_text) = std::fs::read_to_string(&inc_path) {
+                let inc_fallback = sub_dialect.kind();
+                let inc_secs = spice_netlist_ls::segments::segments(&inc_text, inc_fallback);
+                if let Some(loc) = find_subckt_def(&inc_path, name, &inc_secs, visited) {
+                    return Some(loc);
+                }
             }
         }
     }
