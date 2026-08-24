@@ -1,6 +1,6 @@
 [package]
 name = "spice-netlist-ls"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 description = "Highly opinionated SPICE formatter and language server — HSPICE golden reference, dialect-extensible"
 license = "MIT"
