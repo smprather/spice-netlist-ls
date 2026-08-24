@@ -1,0 +1,5 @@
+---
+source: tests/scs_segments.rs
+expression: "lint(\"lang_spice_only.scs\")"
+---
+

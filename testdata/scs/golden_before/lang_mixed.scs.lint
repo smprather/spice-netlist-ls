@@ -1,0 +1,9 @@
+testdata/scs/lang_mixed.scs:7:1: warning [floating-node]: node 'in' is connected to only one element
+testdata/scs/lang_mixed.scs:9:1: warning [duplicate-instance]: duplicate instance 'simulator' (first defined on line 1)
+testdata/scs/lang_mixed.scs:12:1: warning [floating-node]: node '(vdd' is connected to only one element
+testdata/scs/lang_mixed.scs:13:1: warning [floating-node]: node '(d' is connected to only one element
+testdata/scs/lang_mixed.scs:13:1: warning [floating-node]: node 'g' is connected to only one element
+testdata/scs/lang_mixed.scs:14:1: warning [dangling-rc-endpoint]: node '(a' terminates a passive network with no other connection
+testdata/scs/lang_mixed.scs:14:1: warning [dangling-rc-endpoint]: node 'b)' terminates a passive network with no other connection
+testdata/scs/lang_mixed.scs:15:1: warning [duplicate-instance]: duplicate instance 'simulator' (first defined on line 1)
+testdata/scs/lang_mixed.scs:17:1: warning [dangling-rc-endpoint]: node 'b' terminates a passive network with no other connection

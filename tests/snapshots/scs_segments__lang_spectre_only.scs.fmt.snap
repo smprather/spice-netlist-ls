@@ -1,0 +1,11 @@
+---
+source: tests/scs_segments.rs
+expression: "format(\"lang_spectre_only.scs\")"
+---
+// spectre-only — no `simulator lang=` directive anywhere.
+// Unchanged-behavior guard: must format byte-identically to a plain
+// spectre-dialect deck.
+parameters vdd=1.2
+Vdd (vdd 0) vsource dc=vdd
+M1 (d g 0 0) nch w=1u l=1u
+R1 (a b) resistor r=1k

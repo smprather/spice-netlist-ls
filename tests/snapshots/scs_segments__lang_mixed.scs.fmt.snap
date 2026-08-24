@@ -1,0 +1,23 @@
+---
+source: tests/scs_segments.rs
+expression: "format(\"lang_mixed.scs\")"
+---
+simulator lang=spice
+* spice section — `;` is a SPICE inline comment, `key = value` spacing
+
+.subckt inv a y vdd vss
+Mn y a vss vss nch w = 1u
+Mp y a vdd vdd pch w = 2u
+.ends inv
+
+Xinv in out vdd gnd inv
+Cload out gnd 10f
+simulator lang=spectre
+// spectre section — `//` is a comment, `key=value` no spaces, paren nodes
+parameters vdd=1.2
+Vdd (vdd 0) vsource dc=vdd
+M1 (d g 0 0) nch w=1u l=1u // spectre inline comment
+R1 (a b) resistor r=1k
+simulator lang=spice
+* back to spice — verify the switch is per-section, not file-wide
+R2 a b 2k

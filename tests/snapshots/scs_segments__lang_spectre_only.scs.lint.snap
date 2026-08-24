@@ -1,0 +1,9 @@
+---
+source: tests/scs_segments.rs
+expression: "lint(\"lang_spectre_only.scs\")"
+---
+5:1: warning [floating-node]: node '(vdd' is connected to only one element
+6:1: warning [floating-node]: node '(d' is connected to only one element
+6:1: warning [floating-node]: node 'g' is connected to only one element
+7:1: warning [dangling-rc-endpoint]: node '(a' terminates a passive network with no other connection
+7:1: warning [dangling-rc-endpoint]: node 'b)' terminates a passive network with no other connection

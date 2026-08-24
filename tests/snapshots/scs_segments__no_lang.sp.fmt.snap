@@ -1,0 +1,16 @@
+---
+source: tests/scs_segments.rs
+expression: "format(\"no_lang.sp\")"
+---
+* plain SPICE deck — no `simulator lang=` directive.
+* Unchanged-behavior guard: must format byte-identically to today.
+
+.subckt inv a y vdd vss
+Mn y a vss vss nch w=1u
+Mp y a vdd vdd pch w=2u
+.ends inv
+
+Xinv in out vdd gnd inv
+Cload out gnd 10f
+Vdd vdd gnd 1.2
+Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)

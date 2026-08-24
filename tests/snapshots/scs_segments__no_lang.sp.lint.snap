@@ -1,0 +1,5 @@
+---
+source: tests/scs_segments.rs
+expression: "lint(\"no_lang.sp\")"
+---
+

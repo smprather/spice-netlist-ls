@@ -1,0 +1,15 @@
+simulator lang=spice
+* SPICE-only deck opened with a spice switch and never switches back.
+* Correctness anchor: this case already "works" today because the whole
+* file is parsed as spectre, but the `;` inline comment below must be
+* preserved as a comment (it would be mis-tokenized under spectre).
+
+.subckt inv a y vdd vss
+Mn y a vss vss nch w=1u
+Mp y a vdd vdd pch w=2u
+.ends inv
+
+Xinv in out vdd gnd inv
+Cload out gnd 10f
+Vdd vdd gnd 1.2
+Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
