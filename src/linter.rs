@@ -1,4 +1,5 @@
 use crate::dialect::Dialect;
+use crate::fx::FxHashMap;
 use crate::ir::Stmt;
 use crate::parser::{logical_line_spans, parse_logical_line};
 use serde::Serialize;
@@ -225,36 +226,37 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
     let mut diags = Vec::new();
 
     // name(lowercase) -> (port_count, def_line)
-    let mut subckt_defs: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut subckt_defs: FxHashMap<String, (usize, usize)> = FxHashMap::default();
     let mut open_subckts: Vec<(String, usize)> = Vec::new();
 
     // instance names per scope (top level + one per open subckt)
-    let mut scopes: Vec<HashMap<String, usize>> = vec![HashMap::new()];
+    let mut scopes: Vec<FxHashMap<String, usize>> = vec![FxHashMap::default()];
 
-    // node(lowercase) -> (mention_count, first_line)
-    let mut nodes: HashMap<String, (usize, usize)> = HashMap::new();
+    // Nodes are interned: one hash per mention, all per-node state in
+    // id-indexed side tables. Previously this was three HashMap probes and
+    // two String clones per node mention.
+    let mut nodes = NodeTable::default();
 
-    // First-written spelling per node (lowercase -> original) so a later
-    // re-spelling with different case in a case-insensitive dialect can be
-    // flagged as a likely typo.
-    let mut node_spellings: HashMap<String, (String, usize)> = HashMap::new();
-
-    // instance-node mentions as written: (lowercase, original spelling, line,
-    // element type char, e.g. 'R'/'C' for passive-network classification)
-    let mut inst_node_mentions: Vec<(String, String, usize, char)> = Vec::new();
+    // instance-node mentions: (node id, line, element type char, e.g.
+    // 'R'/'C' for passive-network classification)
+    let mut inst_node_mentions: Vec<(u32, u32, char)> = Vec::new();
 
     // (ref_name, node_count, line)
     let mut xinsts: Vec<(String, usize, usize)> = Vec::new();
-
-    // Nodes referenced by measurements/probes/saves — semantically consumed
-    // even when nothing drives them.
-    let mut observed_nodes: HashSet<String> = HashSet::new();
 
     // ngspice `.control` blocks contain simulator command language, not
     // netlist cards; instance and node analysis must skip the interior.
     let mut control_depth = 0usize;
 
-    for (start, _, line_text) in logical_line_spans(input, dialect.as_ref()) {
+    let logical = logical_line_spans(input, dialect.as_ref());
+    // Pre-size to the statement count: every instance lands in the top scope
+    // map and every node in the interner, so growing them from empty would
+    // rehash ~17 times on large decks.
+    scopes[0].reserve(logical.len());
+    nodes.map.reserve(logical.len());
+    inst_node_mentions.reserve(2 * logical.len());
+
+    for &(start, _, ref line_text) in &logical {
         let trimmed = line_text.trim();
         if trimmed.is_empty() || dialect.is_comment_line(trimmed) {
             continue;
@@ -286,7 +288,7 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
         match directive_name.as_deref() {
             Some("control") => {
                 control_depth += 1;
-                collect_observed(&line_text, &mut observed_nodes);
+                collect_observed(&line_text, &mut nodes);
                 continue;
             }
             Some("endc") => {
@@ -299,7 +301,7 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
         if control_depth > 0 {
             // Command language (`let`, `meas`, `if`, ...): only measurement
             // observation matters here, never netlist structure.
-            collect_observed(&line_text, &mut observed_nodes);
+            collect_observed(&line_text, &mut nodes);
             continue;
         }
 
@@ -308,14 +310,12 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 if !s.name.is_empty() {
                     subckt_defs.insert(s.name.to_ascii_lowercase(), (s.ports.len(), start));
                     open_subckts.push((s.name.to_ascii_lowercase(), start));
-                    scopes.push(HashMap::new());
+                    scopes.push(FxHashMap::default());
                     // Count ports as node mentions so a port used once in the
                     // body isn't flagged floating.
                     for p in &s.ports {
-                        bump(&mut nodes, p, start);
-                        node_spellings
-                            .entry(p.to_ascii_lowercase())
-                            .or_insert_with(|| (p.clone(), start));
+                        let id = nodes.intern_mention(p, start as u32);
+                        nodes.count[id as usize] += 1;
                     }
                 }
             }
@@ -344,7 +344,7 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 }
                 scopes.pop();
                 if scopes.is_empty() {
-                    scopes.push(HashMap::new());
+                    scopes.push(FxHashMap::default());
                 }
             }
             Stmt::Instance(inst) => {
@@ -370,32 +370,30 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 }
 
                 for n in &inst.nodes {
-                    let lower = n.to_ascii_lowercase();
-                    bump(&mut nodes, &lower, start);
-                    match node_spellings.get(&lower) {
-                        Some((orig, first_line)) if orig != n => {
-                            diags.push(Diagnostic {
-                                range: line_range(start as u32, trimmed.len() as u32),
-                                severity: Severity::Warning,
-                                code: "node-case-collision",
-                                message: format!(
-                                    "node '{n}' differs only by case from '{orig}' \
-                                     (first used on line {}); names are case-insensitive",
-                                    first_line + 1
-                                ),
-                            });
-                        }
-                        Some(_) => {}
-                        None => {
-                            node_spellings.insert(lower.clone(), (n.clone(), start));
-                        }
+                    let id = nodes.intern_mention(n, start as u32);
+                    nodes.count[id as usize] += 1;
+                    // First-written spelling per node so a later re-spelling
+                    // with different case in a case-insensitive dialect can
+                    // be flagged as a likely typo.
+                    let (orig, first_line) = nodes.spelling[id as usize].as_ref().unwrap();
+                    if orig.as_ref() != n {
+                        diags.push(Diagnostic {
+                            range: line_range(start as u32, trimmed.len() as u32),
+                            severity: Severity::Warning,
+                            code: "node-case-collision",
+                            message: format!(
+                                "node '{n}' differs only by case from '{orig}' \
+                                 (first used on line {}); names are case-insensitive",
+                                *first_line + 1
+                            ),
+                        });
                     }
-                    inst_node_mentions.push((lower, n.clone(), start, etype.unwrap_or('?')));
+                    inst_node_mentions.push((id, start as u32, etype.unwrap_or('?')));
                 }
 
                 if etype == Some('X') {
                     if let Some(r) = &inst.model_or_value {
-                        xinsts.push((r.clone(), inst.nodes.len(), start));
+                        xinsts.push((r.to_string(), inst.nodes.len(), start));
                     } else {
                         diags.push(Diagnostic {
                             range: line_range(start as u32, trimmed.len() as u32),
@@ -406,8 +404,8 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                     }
                 }
             }
-            Stmt::Directive(d) if matches!(d.name.as_str(), "measure" | "meas" | "probe" | "print" | "plot" | "save") => {
-                collect_observed(&line_text, &mut observed_nodes);
+            Stmt::Directive(d) if matches!(d.name.as_ref(), "measure" | "meas" | "probe" | "print" | "plot" | "save") => {
+                collect_observed(&line_text, &mut nodes);
             }
             _ => {}
         }
@@ -451,14 +449,13 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
         }
     }
 
-    for (lower, spelling, line, etype) in &inst_node_mentions {
-        if is_ground(spelling) || observed_nodes.contains(lower) {
+    for (id, line, etype) in &inst_node_mentions {
+        // Instance mentions always record a spelling at intern time.
+        let spelling = nodes.spelling[*id as usize].as_ref().unwrap().0.as_ref();
+        if is_ground(spelling) || nodes.observed[*id as usize] {
             continue;
         }
-        if let Some(&(count, first_line)) = nodes.get(lower)
-            && count == 1
-            && first_line == *line
-        {
+        if nodes.count[*id as usize] == 1 && nodes.first_line[*id as usize] == *line {
             // A lonely node on a passive element is the signature of an
             // extracted RC/L network endpoint — triage it separately from a
             // dangling device pin.
@@ -476,7 +473,7 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
                 )
             };
             diags.push(Diagnostic {
-                range: line_range(*line as u32, spelling.len() as u32),
+                range: line_range(*line, spelling.len() as u32),
                 severity: Severity::Warning,
                 code,
                 message,
@@ -489,20 +486,57 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
     diags
 }
 
-/// Increment the mention count for an already-lowercased node name.
-fn bump(map: &mut HashMap<String, (usize, usize)>, lower: &str, line: usize) {
-    if let Some(entry) = map.get_mut(lower) {
-        entry.0 += 1;
-        entry.1 = entry.1.min(line);
-    } else {
-        map.insert(lower.to_string(), (1, line));
+/// Node interner. Maps a lowercased node name to a dense id; all per-node
+/// state (mention count, first-mention line, first-written spelling,
+/// observed-by-measurement flag) lives in id-indexed vectors.
+///
+/// `spelling` stays `None` for ids created purely by `v(...)` observation so
+/// an observed token can never seed a `node-case-collision` report — only a
+/// real instance/port mention sets it. This matches the previous
+/// two-map design where observed nodes never entered the spelling map.
+#[derive(Default)]
+struct NodeTable {
+    map: FxHashMap<Box<str>, u32>,
+    spelling: Vec<Option<(Box<str>, u32)>>,
+    count: Vec<u32>,
+    first_line: Vec<u32>,
+    observed: Vec<bool>,
+}
+
+impl NodeTable {
+    /// Id of `lower` (already lowercased), interning with `line` on first
+    /// sight. Does not bump the mention count or set a spelling.
+    fn intern(&mut self, lower: String, line: u32) -> u32 {
+        if let Some(&id) = self.map.get(lower.as_str()) {
+            return id;
+        }
+        let id = self.spelling.len() as u32;
+        self.map.insert(lower.into_boxed_str(), id);
+        self.spelling.push(None);
+        self.count.push(0);
+        self.first_line.push(line);
+        self.observed.push(false);
+        id
+    }
+
+    /// Intern an instance/port mention: sets the first-written spelling on
+    /// first mention. Caller bumps `count` and (for instances) compares the
+    /// spelling for case-collision diagnostics.
+    fn intern_mention(&mut self, name: &str, line: u32) -> u32 {
+        let id = self.intern(name.to_ascii_lowercase(), line);
+        if self.spelling[id as usize].is_none() {
+            self.spelling[id as usize] = Some((name.into(), line));
+        }
+        id
     }
 }
 
 /// Pull `v(node)` / `v(n1,n2)` / `i(vsrc)` references out of a measurement,
 /// probe, save, or `.control` command line. Anything observed by an
 /// analysis statement is not floating, no matter how it is driven.
-fn collect_observed(line: &str, out: &mut HashSet<String>) {
+/// Observed tokens are interned (the line is unused for them — observed
+/// nodes are skipped before any line comparison) but never set a spelling.
+fn collect_observed(line: &str, nodes: &mut NodeTable) {
     let lower = line.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut i = 0;
@@ -520,7 +554,8 @@ fn collect_observed(line: &str, out: &mut HashSet<String>) {
                         c.is_ascii_alphanumeric() || "[]().$_!#<>|*\\".contains(c)
                     })
                 {
-                    out.insert(t.to_string());
+                    let id = nodes.intern(t.to_string(), 0);
+                    nodes.observed[id as usize] = true;
                 }
             }
             i = j;

@@ -1,15 +1,23 @@
 use crate::dialect::Dialect;
 use crate::ir::{Directive, File, Instance, Param, Stmt, Subckt};
 use crate::starts_with_ci;
+use std::borrow::Cow;
 use std::sync::Arc;
 
-pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File {
+pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File<'_> {
     let logical = logical_line_spans(input, dialect.as_ref());
     let mut stmts: Vec<Stmt> = Vec::with_capacity(logical.len());
     let mut stack: Vec<Subckt> = Vec::new();
 
     for (_, _, line) in &logical {
-        let stmt = parse_logical_line(line, dialect.as_ref());
+        // Statements borrow their token text from the input. A logical line
+        // assembled from continuations is owned by the span table, so a
+        // statement parsed from one must be deep-copied to outlive it —
+        // cheap, since continuations are rare next to plain lines.
+        let stmt = match line {
+            Cow::Borrowed(s) => parse_logical_line(s, dialect.as_ref()),
+            Cow::Owned(s) => parse_logical_line(s, dialect.as_ref()).into_owned(),
+        };
         match stmt {
             Stmt::Subckt(s) => {
                 stack.push(s);
@@ -69,8 +77,12 @@ pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File {
 /// its continuations to an unrelated element above (data corruption). An
 /// unattached continuation is kept verbatim — it is not a parse error and
 /// the linter flags it (`orphan-continuation`).
-pub fn logical_line_spans(input: &str, dialect: &dyn Dialect) -> Vec<(usize, usize, String)> {
-    let mut out: Vec<(usize, usize, String)> = Vec::new();
+///
+/// Span text borrows from `input`; only a line that actually absorbs a
+/// continuation is copied (the rare case), so large decks parse without a
+/// per-line `String` allocation.
+pub fn logical_line_spans<'a>(input: &'a str, dialect: &dyn Dialect) -> Vec<(usize, usize, Cow<'a, str>)> {
+    let mut out: Vec<(usize, usize, Cow<'a, str>)> = Vec::new();
     let cont = dialect.continuation_char();
     for (lineno, raw) in input.lines().enumerate() {
         let trimmed = raw.trim_start();
@@ -90,18 +102,19 @@ pub fn logical_line_spans(input: &str, dialect: &dyn Dialect) -> Vec<(usize, usi
                     break;
                 }
                 if !rest.is_empty() {
-                    out[idx].2.push(' ');
-                    out[idx].2.push_str(rest);
+                    let parent = out[idx].2.to_mut();
+                    parent.push(' ');
+                    parent.push_str(rest);
                 }
                 out[idx].1 = lineno;
                 attached = true;
                 break;
             }
             if !attached {
-                out.push((lineno, lineno, raw.to_string()));
+                out.push((lineno, lineno, Cow::Borrowed(raw)));
             }
         } else {
-            out.push((lineno, lineno, raw.to_string()));
+            out.push((lineno, lineno, Cow::Borrowed(raw)));
         }
     }
     out
@@ -132,7 +145,7 @@ pub fn subckt_ref_at_line(input: &str, line: usize, dialect: &dyn Dialect) -> Op
         Stmt::Instance(inst)
             if inst.name.chars().next().is_some_and(|c| c.eq_ignore_ascii_case(&'X')) =>
         {
-            inst.model_or_value
+            inst.model_or_value.map(|c| c.into_owned())
         }
         _ => None,
     }
@@ -156,7 +169,7 @@ pub fn include_paths(input: &str, dialect: &dyn Dialect) -> Vec<String> {
             continue;
         }
         if let Stmt::Directive(d) = parse_logical_line(trimmed, dialect)
-            && matches!(d.name.as_str(), "include" | "inc" | "lib")
+            && matches!(d.name.as_ref(), "include" | "inc" | "lib")
             && let Some(first) = d.args.first()
         {
             let p = first.trim_matches(['"', '\'']);
@@ -196,7 +209,7 @@ pub(crate) fn scan_subckt_defs_and_includes(
                 defs.push((s.name.to_ascii_lowercase(), s.ports.len()));
             }
             Stmt::Directive(d)
-                if is_include && matches!(d.name.as_str(), "include" | "inc" | "lib") =>
+                if is_include && matches!(d.name.as_ref(), "include" | "inc" | "lib") =>
             {
                 if let Some(first) = d.args.first() {
                     let p = first.trim_matches(['"', '\'']);
@@ -211,17 +224,17 @@ pub(crate) fn scan_subckt_defs_and_includes(
     (defs, incs)
 }
 
-pub fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
+pub fn parse_logical_line<'a>(line: &'a str, dialect: &dyn Dialect) -> Stmt<'a> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Stmt::Blank;
     }
     if dialect.is_comment_line(trimmed) {
-        return Stmt::Comment(trimmed.to_string());
+        return Stmt::Comment(Cow::Borrowed(trimmed));
     }
 
     let (code, inline_comment) = match inline_comment_start(line, dialect) {
-        Some(i) => (&line[..i], Some(line[i..].trim().to_string())),
+        Some(i) => (&line[..i], Some(Cow::Borrowed(line[i..].trim()))),
         None => (line, None),
     };
 
@@ -233,20 +246,19 @@ pub fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
         return Stmt::Blank;
     }
 
-    if starts_with_ci(code_trim, ".subckt") {
-        return parse_subckt(code_trim, inline_comment);
-    }
-    if starts_with_ci(code_trim, ".ends") {
-        let args = tokenize(&code_trim[5..]).into_iter().map(str::to_string).collect();
-        return Stmt::Directive(Directive {
-            name: "ends".to_string(),
-            args,
-            params: Vec::new(),
-            inline_comment,
-        });
-    }
-
-    if code_trim.starts_with(dialect.directive_prefix()) {
+    if code_trim.starts_with('.') {
+        if starts_with_ci(code_trim, ".subckt") {
+            return parse_subckt(code_trim, inline_comment);
+        }
+        if starts_with_ci(code_trim, ".ends") {
+            let args = tokenize(&code_trim[5..]).into_iter().map(Cow::Borrowed).collect();
+            return Stmt::Directive(Directive {
+                name: Cow::Borrowed("ends"),
+                args,
+                params: Vec::new(),
+                inline_comment,
+            });
+        }
         return parse_directive(code_trim, inline_comment);
     }
 
@@ -256,6 +268,11 @@ pub fn parse_logical_line(line: &str, dialect: &dyn Dialect) -> Stmt {
 /// Byte offset where the inline comment starts, if the line has one.
 fn inline_comment_start(line: &str, dialect: &dyn Dialect) -> Option<usize> {
     let delim = dialect.inline_comment_delim()?;
+    // SIMD fast reject: a line without the delimiter byte can never match
+    // (`str::contains(char)` lowers to memchr).
+    if !line.contains(delim) {
+        return None;
+    }
 
     let mut in_single = false;
     let mut in_double = false;
@@ -290,12 +307,12 @@ fn inline_comment_start(line: &str, dialect: &dyn Dialect) -> Option<usize> {
     None
 }
 
-fn parse_directive(line: &str, inline_comment: Option<String>) -> Stmt {
+fn parse_directive<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> Stmt<'a> {
     let inner = line[1..].trim();
     let mut tokens = tokenize(inner);
     if tokens.is_empty() {
         return Stmt::Directive(Directive {
-            name: String::new(),
+            name: Cow::Borrowed(""),
             args: Vec::new(),
             params: Vec::new(),
             inline_comment,
@@ -304,14 +321,14 @@ fn parse_directive(line: &str, inline_comment: Option<String>) -> Stmt {
     let name = tokens.remove(0).to_ascii_lowercase();
     let (args, params) = split_args_params(tokens);
     Stmt::Directive(Directive {
-        name,
+        name: Cow::Owned(name),
         args,
         params,
         inline_comment,
     })
 }
 
-fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
+fn parse_subckt<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> Stmt<'a> {
     let inner = if starts_with_ci(line[1..].trim(), "subckt") {
         line[1 + 6..].trim()
     } else {
@@ -320,7 +337,7 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
     let mut tokens = tokenize(inner);
     if tokens.is_empty() {
         return Stmt::Subckt(Subckt {
-            name: String::new(),
+            name: Cow::Borrowed(""),
             ports: Vec::new(),
             params: Vec::new(),
             body: Vec::new(),
@@ -328,7 +345,7 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
             ends_name: None,
         });
     }
-    let name = tokens.remove(0).to_string();
+    let name = tokens.remove(0);
     let mut ports = Vec::new();
     let mut param_tokens = Vec::new();
     let mut in_params = false;
@@ -339,12 +356,12 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
         if in_params {
             param_tokens.push(tok);
         } else {
-            ports.push(tok.to_string());
+            ports.push(Cow::Borrowed(tok));
         }
     }
     let (_, params) = split_args_params(param_tokens);
     Stmt::Subckt(Subckt {
-        name,
+        name: Cow::Borrowed(name),
         ports,
         params,
         body: Vec::new(),
@@ -353,7 +370,7 @@ fn parse_subckt(line: &str, inline_comment: Option<String>) -> Stmt {
     })
 }
 
-fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
+fn parse_instance<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> Stmt<'a> {
     let tokens = tokenize(line);
     if tokens.is_empty() {
         return Stmt::Blank;
@@ -363,14 +380,19 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
     let rest = &tokens[1..];
 
     if matches!(etype, 'R' | 'C' | 'L') && rest.len() >= 2 {
-        let nodes = vec![rest[0].to_string(), rest[1].to_string()];
+        let nodes = vec![Cow::Borrowed(rest[0]), Cow::Borrowed(rest[1])];
         let tail = &rest[2..];
         // Spectre writes `R1 (a b) resistor r=1k` — after tokenization the
         // paren node list lands in a single token "(a b)". Keep the model
         // name when the tail starts with a non-param token.
-        let (model_or_value, params) = parse_tail_params(tail, &etype.to_string());
+        let etype_str = match etype {
+            'R' => "R",
+            'C' => "C",
+            _ => "L",
+        };
+        let (model_or_value, params) = parse_tail_params(tail, etype_str);
         return Stmt::Instance(Instance {
-            name: name.to_string(),
+            name: Cow::Borrowed(name),
             nodes,
             model_or_value,
             params,
@@ -382,20 +404,20 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
         let param_start = find_param_start(rest).unwrap_or(rest.len());
         let (nodes_and_model, param_part) = rest.split_at(param_start);
         let (nodes, model) = if nodes_and_model.len() >= 2 {
-            let m = nodes_and_model.last().map(|s| s.to_string());
+            let m = nodes_and_model.last().map(|&s| Cow::Borrowed(s));
             let n = nodes_and_model[..nodes_and_model.len() - 1]
                 .iter()
-                .map(|s| s.to_string())
+                .map(|&s| Cow::Borrowed(s))
                 .collect();
             (n, m)
         } else if nodes_and_model.len() == 1 {
-            (Vec::new(), Some(nodes_and_model[0].to_string()))
+            (Vec::new(), Some(Cow::Borrowed(nodes_and_model[0])))
         } else {
             (Vec::new(), None)
         };
         let (_, params) = split_args_params(param_part.to_vec());
         return Stmt::Instance(Instance {
-            name: name.to_string(),
+            name: Cow::Borrowed(name),
             nodes,
             model_or_value: model,
             params,
@@ -405,7 +427,7 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
 
     if name.starts_with('.') {
         return Stmt::Instance(Instance {
-            name: name.to_string(),
+            name: Cow::Borrowed(name),
             nodes: Vec::new(),
             model_or_value: None,
             params: Vec::new(),
@@ -414,9 +436,9 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
     }
 
     let node_count = element_node_count(etype);
-    let (nodes, tail): (Vec<String>, &[&str]) = match node_count {
+    let (nodes, tail): (Vec<Cow<'a, str>>, &[&'a str]) = match node_count {
         Some(n) if rest.len() > n => (
-            rest[..n].iter().map(|s| s.to_string()).collect(),
+            rest[..n].iter().map(|&s| Cow::Borrowed(s)).collect(),
             &rest[n..],
         ),
         _ => {
@@ -424,7 +446,7 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
             (
                 rest[..param_start.min(rest.len())]
                     .iter()
-                    .map(|s| s.to_string())
+                    .map(|&s| Cow::Borrowed(s))
                     .collect(),
                 &rest[param_start.min(rest.len())..],
             )
@@ -440,12 +462,12 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
         // Positional value tail (e.g. `V1 a 0 DC {vssr}`): keep every token;
         // tokens after the first become valueless params, which round-trip
         // through the formatter unchanged.
-        let m = Some(tail[0].to_string());
+        let m = Some(Cow::Borrowed(tail[0]));
         let p = tail[1..]
             .iter()
-            .map(|t| Param {
-                key: t.to_string(),
-                value: String::new(),
+            .map(|&t| Param {
+                key: Cow::Borrowed(t),
+                value: Cow::Borrowed(""),
             })
             .collect();
         (m, p)
@@ -458,7 +480,7 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
     };
 
     Stmt::Instance(Instance {
-        name: name.to_string(),
+        name: Cow::Borrowed(name),
         nodes,
         model_or_value,
         params,
@@ -466,7 +488,7 @@ fn parse_instance(line: &str, inline_comment: Option<String>) -> Stmt {
     })
 }
 
-fn parse_tail_params(tail: &[&str], etype: &str) -> (Option<String>, Vec<Param>) {
+fn parse_tail_params<'a>(tail: &[&'a str], etype: &str) -> (Option<Cow<'a, str>>, Vec<Param<'a>>) {
     if tail.is_empty() {
         return (None, Vec::new());
     }
@@ -488,7 +510,7 @@ fn parse_tail_params(tail: &[&str], etype: &str) -> (Option<String>, Vec<Param>)
             let first = tail[0];
             if first.eq_ignore_ascii_case(etype) && tail.len() > 1 {
                 let (_, params) = split_args_params(tail[1..].to_vec());
-                return (Some(first.to_string()), params);
+                return (Some(Cow::Borrowed(first)), params);
             }
             let has_param_eq = tail[1..].iter().any(|t| *t == "=" || t.contains('='));
             if has_param_eq {
@@ -498,7 +520,7 @@ fn parse_tail_params(tail: &[&str], etype: &str) -> (Option<String>, Vec<Param>)
                 // param key *is* the canonical param) has first == tail's
                 // param key, handled below.
                 let (_, params) = split_args_params(tail[1..].to_vec());
-                return (Some(first.to_string()), params);
+                return (Some(Cow::Borrowed(first)), params);
             }
         }
         let (_, params) = split_args_params(tail.to_vec());
@@ -511,14 +533,14 @@ fn parse_tail_params(tail: &[&str], etype: &str) -> (Option<String>, Vec<Param>)
         return (None, params);
     }
     if tail.len() == 1 {
-        return (Some(tail[0].to_string()), Vec::new());
+        return (Some(Cow::Borrowed(tail[0])), Vec::new());
     }
-    (Some(tail[0].to_string()), Vec::new())
+    (Some(Cow::Borrowed(tail[0])), Vec::new())
 }
 
-fn split_args_params(tokens: Vec<&str>) -> (Vec<String>, Vec<Param>) {
-    let mut args: Vec<String> = Vec::new();
-    let mut params: Vec<Param> = Vec::new();
+fn split_args_params<'a>(tokens: Vec<&'a str>) -> (Vec<Cow<'a, str>>, Vec<Param<'a>>) {
+    let mut args: Vec<Cow<'a, str>> = Vec::new();
+    let mut params: Vec<Param<'a>> = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i];
@@ -529,12 +551,12 @@ fn split_args_params(tokens: Vec<&str>) -> (Vec<String>, Vec<Param>) {
             if let Some(prev) = args.pop() {
                 if i + 1 < tokens.len() && tokens[i + 1] != "=" {
                     i += 1;
-                    let value = tokens[i].trim().to_string();
-                    params.push(Param { key: prev, value });
+                    let value = tokens[i].trim();
+                    params.push(Param { key: prev, value: Cow::Borrowed(value) });
                 } else {
                     params.push(Param {
                         key: prev,
-                        value: String::new(),
+                        value: Cow::Borrowed(""),
                     });
                 }
             }
@@ -543,64 +565,54 @@ fn split_args_params(tokens: Vec<&str>) -> (Vec<String>, Vec<Param>) {
         }
         if tok.contains('=') {
             let (k, v) = tok.split_once('=').unwrap();
-            let key = k.trim().to_string();
-            let mut value = v.trim().to_string();
+            let key = k.trim();
+            let mut value = v.trim();
             if value.is_empty() && i + 1 < tokens.len() && tokens[i + 1] != "=" && !tokens[i + 1].contains('=') {
                 i += 1;
-                value = tokens[i].trim().to_string();
+                value = tokens[i].trim();
             }
             if key.is_empty() {
                 if let Some(prev) = args.pop() {
-                    params.push(Param { key: prev, value });
+                    params.push(Param { key: prev, value: Cow::Borrowed(value) });
                 }
             } else {
-                params.push(Param { key, value });
+                params.push(Param { key: Cow::Borrowed(key), value: Cow::Borrowed(value) });
             }
             i += 1;
             continue;
         }
         if !params.is_empty() {
             if i + 1 < tokens.len() && tokens[i + 1] == "=" {
-                let key = tok.to_string();
-                let val = if i + 2 < tokens.len() {
-                    tokens[i + 2].to_string()
-                } else {
-                    String::new()
-                };
+                let val = if i + 2 < tokens.len() { tokens[i + 2] } else { "" };
                 params.push(Param {
-                    key,
-                    value: val.trim().to_string(),
+                    key: Cow::Borrowed(tok),
+                    value: Cow::Borrowed(val.trim()),
                 });
                 i += 3;
                 continue;
             }
             if i + 1 < tokens.len() && tokens[i + 1].contains('=') {
-                args.push(tok.to_string());
+                args.push(Cow::Borrowed(tok));
                 i += 1;
                 continue;
             }
             params.push(Param {
-                key: tok.to_string(),
-                value: String::new(),
+                key: Cow::Borrowed(tok),
+                value: Cow::Borrowed(""),
             });
             i += 1;
             continue;
         }
         if i + 1 < tokens.len() && tokens[i + 1] == "=" {
-            let key = tok.to_string();
-            let val = if i + 2 < tokens.len() {
-                tokens[i + 2].to_string()
-            } else {
-                String::new()
-            };
+            let val = if i + 2 < tokens.len() { tokens[i + 2] } else { "" };
             params.push(Param {
-                key,
-                value: val.trim().to_string(),
+                key: Cow::Borrowed(tok),
+                value: Cow::Borrowed(val.trim()),
             });
             i += 3;
             continue;
         }
-        args.push(tok.to_string());
+        args.push(Cow::Borrowed(tok));
         i += 1;
     }
     (args, params)
@@ -609,6 +621,12 @@ fn split_args_params(tokens: Vec<&str>) -> (Vec<String>, Vec<Param>) {
 /// Whitespace-split tokens as borrowed slices; quoted spans keep whitespace
 /// and their surrounding quotes intact. No per-token allocation.
 fn tokenize(s: &str) -> Vec<&str> {
+    // Fast path: ASCII-only, quote-free lines need no quote tracking —
+    // `split_ascii_whitespace` is exact there (Unicode whitespace and quotes
+    // are both non-ASCII-or-quote, so the checks are exhaustive).
+    if s.is_ascii() && !s.contains('\'') && !s.contains('"') {
+        return s.split_ascii_whitespace().collect();
+    }
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     let mut in_single = false;

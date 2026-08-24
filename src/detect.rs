@@ -91,25 +91,49 @@ pub fn score_dialect(input: &str) -> DialectScores {
         // Continuation lines contribute inline-comment evidence only.
         let code = trimmed.strip_prefix('+').map(str::trim).unwrap_or(trimmed);
 
-        if starts_with_ci(code, "simulator lang") {
-            s.spectre += DECISIVE;
-        }
-        if starts_with_ci(code, "ahdl_include") {
-            s.spectre += DECISIVE;
-        }
-        for kw in ["section ", "endsection ", "statistics "] {
-            if starts_with_ci(code, kw) {
-                s.spectre += DECISIVE;
-                break;
+        // First-byte dispatch: the keyword probes below all match a known
+        // leading byte, so a line starting with anything else (the vast
+        // majority — device cards) skips every `starts_with_ci` call.
+        match code.as_bytes().first().copied().map(|b| b.to_ascii_lowercase()) {
+            Some(b's') => {
+                if starts_with_ci(code, "simulator lang") {
+                    s.spectre += DECISIVE;
+                }
+                for kw in ["section ", "statistics "] {
+                    if starts_with_ci(code, kw) {
+                        s.spectre += DECISIVE;
+                        break;
+                    }
+                }
             }
-        }
-        // Bare `parameters`/`variables`/`include "..."` could be title lines
-        // in SPICE dialects, so they stay weak evidence.
-        for kw in ["parameters ", "variables ", "include \""] {
-            if starts_with_ci(code, kw) {
-                s.spectre += 2;
-                break;
+            Some(b'a') => {
+                if starts_with_ci(code, "ahdl_include") {
+                    s.spectre += DECISIVE;
+                }
             }
+            Some(b'e') => {
+                if starts_with_ci(code, "endsection ") {
+                    s.spectre += DECISIVE;
+                }
+            }
+            // Bare `parameters`/`variables`/`include "..."` could be title
+            // lines in SPICE dialects, so they stay weak evidence.
+            Some(b'p') => {
+                if starts_with_ci(code, "parameters ") {
+                    s.spectre += 2;
+                }
+            }
+            Some(b'v') => {
+                if starts_with_ci(code, "variables ") {
+                    s.spectre += 2;
+                }
+            }
+            Some(b'i') => {
+                if starts_with_ci(code, "include \"") {
+                    s.spectre += 2;
+                }
+            }
+            _ => {}
         }
 
         if let Some(rest) = code.strip_prefix('.') {
@@ -143,26 +167,38 @@ pub fn score_dialect(input: &str) -> DialectScores {
             parens += 1;
         }
 
+        // Inline-comment / measurement-deref evidence, one fused quote-aware
+        // pass per line. Pre-filter with `contains` (SIMD memchr): marker-free
+        // lines — the common case in generated decks — never enter the scan,
+        // and the caps keep fully-saturated streams out of it too.
+        //
         // ngspice measurement-result dereference (`FROM $&t1 TO=$&t2`):
-        // HSPICE would treat the `$` as the start of an inline comment.
-        if meas_refs < INLINE_CAP && has_unquoted(code, "$&") {
-            s.ngspice += DECISIVE;
-            meas_refs += 1;
-        }
-
-        if semis < INLINE_CAP && has_unquoted(code, ";") {
-            s.ngspice += 1;
-            s.ltspice += 1;
-            semis += 1;
-        }
-        // `$` inline-comment evidence must not fire on `$&` derefs.
-        if dollars < INLINE_CAP && has_unquoted_dollar(code) {
-            s.hspice += 1;
-            dollars += 1;
-        }
-        if slashes < SPECTRE_SYNTAX_CAP && has_unquoted(code, "//") {
-            s.spectre += DECISIVE;
-            slashes += 1;
+        // HSPICE would treat the `$` as the start of an inline comment, so
+        // `$` evidence must not fire on `$&` derefs.
+        if (semis < INLINE_CAP
+            || dollars < INLINE_CAP
+            || meas_refs < INLINE_CAP
+            || slashes < SPECTRE_SYNTAX_CAP)
+            && (code.contains(';') || code.contains('$') || code.contains('/'))
+        {
+            let ev = scan_inline_evidence(code);
+            if ev.meas_ref && meas_refs < INLINE_CAP {
+                s.ngspice += DECISIVE;
+                meas_refs += 1;
+            }
+            if ev.semi && semis < INLINE_CAP {
+                s.ngspice += 1;
+                s.ltspice += 1;
+                semis += 1;
+            }
+            if ev.dollar && dollars < INLINE_CAP {
+                s.hspice += 1;
+                dollars += 1;
+            }
+            if ev.slashes && slashes < SPECTRE_SYNTAX_CAP {
+                s.spectre += DECISIVE;
+                slashes += 1;
+            }
         }
     }
     s
@@ -178,32 +214,23 @@ fn has_leading_paren_nodes(code: &str) -> bool {
     }
 }
 
-/// True if ASCII `needle` occurs outside single/double-quoted spans.
-/// Byte-oriented: UTF-8 continuation bytes are >= 0x80 and can never equal an
-/// ASCII quote or needle byte, so scanning bytes is exact, not an approximation.
-fn has_unquoted(code: &str, needle: &str) -> bool {
-    let bytes = code.as_bytes();
-    let nb = needle.as_bytes();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\'' && !in_double {
-            in_single = !in_single;
-        } else if b == b'"' && !in_single {
-            in_double = !in_double;
-        } else if !in_single && !in_double && b == nb[0] && bytes[i..].starts_with(nb) {
-            return true;
-        }
-        i += 1;
-    }
-    false
+/// Inline-evidence flags collected by one quote-aware pass over a line.
+#[derive(Default)]
+struct InlineEvidence {
+    semi: bool,
+    dollar: bool,
+    meas_ref: bool,
+    slashes: bool,
 }
 
-/// Unquoted `$` that is not part of an ngspice `$&` measurement dereference.
-fn has_unquoted_dollar(code: &str) -> bool {
+/// Single quote-aware byte pass collecting every inline-evidence marker at
+/// once (`;`, unquoted `$` that is not a `$&` deref, `$&`, `//`) — replacing
+/// what used to be four independent scans per line. Byte-oriented: UTF-8
+/// continuation bytes are >= 0x80 and can never equal an ASCII quote or
+/// marker byte, so scanning bytes is exact, not an approximation.
+fn scan_inline_evidence(code: &str) -> InlineEvidence {
     let bytes = code.as_bytes();
+    let mut ev = InlineEvidence::default();
     let mut in_single = false;
     let mut in_double = false;
     let mut i = 0;
@@ -213,16 +240,27 @@ fn has_unquoted_dollar(code: &str) -> bool {
             in_single = !in_single;
         } else if b == b'"' && !in_single {
             in_double = !in_double;
-        } else if !in_single && !in_double && b == b'$' {
-            if bytes.get(i + 1) == Some(&b'&') {
-                i += 1;
-            } else {
-                return true;
+        } else if !in_single && !in_double {
+            match b {
+                b';' => ev.semi = true,
+                b'$' => {
+                    if bytes.get(i + 1) == Some(&b'&') {
+                        ev.meas_ref = true;
+                        i += 1;
+                    } else {
+                        ev.dollar = true;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    ev.slashes = true;
+                    i += 1;
+                }
+                _ => {}
             }
         }
         i += 1;
     }
-    false
+    ev
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use crate::dialect::{Dialect, DialectKind};
 use crate::ir::{Directive, File, Instance, Param, Stmt, Subckt};
+use std::borrow::Cow;
 
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
@@ -99,30 +100,39 @@ fn format_stmt(
             push_line(out, &line, opts, dialect, depth, first, prev_was_blank);
         }
         Stmt::Directive(d) => {
-            let line = format_directive(d, dialect);
-            push_line_wrapped(out, &line, d.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
+            let start = out.len();
+            format_directive_into(d, dialect, out);
+            emit_wrapped(out, start, d.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
         }
         Stmt::Instance(inst) => {
-            let line = format_instance(inst, dialect);
-            push_line_wrapped(out, &line, inst.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
+            let start = out.len();
+            format_instance_into(inst, dialect, out);
+            emit_wrapped(out, start, inst.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
         }
         Stmt::Subckt(s) => {
             if !*first && !*prev_was_blank {
                 out.push('\n');
             }
-            let header = format_subckt_header(s, dialect);
-            push_line_wrapped(out, &header, s.inline_comment.as_deref(), opts, dialect, depth, first, prev_was_blank);
+            let start = out.len();
+            format_subckt_header_into(s, dialect, out);
+            emit_wrapped(out, start, s.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             for inner in &s.body {
                 format_stmt(inner, out, opts, dialect, depth + 1, first, prev_was_blank);
             }
-            let ends = if let Some(e) = &s.ends_name {
-                format!(".ends {e}")
-            } else if s.name.is_empty() {
-                ".ends".to_string()
-            } else {
-                format!(".ends {}", s.name)
-            };
-            push_line(out, &ends, opts, dialect, depth, first, prev_was_blank);
+            let ends_start = out.len();
+            out.push_str(".ends");
+            if let Some(e) = &s.ends_name {
+                out.push(' ');
+                out.push_str(e);
+            } else if !s.name.is_empty() {
+                out.push(' ');
+                out.push_str(&s.name);
+            }
+            if out.len() > ends_start {
+                out.push('\n');
+                *first = false;
+                *prev_was_blank = false;
+            }
             *prev_was_blank = false;
             if depth == 0 {
                 out.push('\n');
@@ -151,32 +161,36 @@ fn push_line(
     *prev_was_blank = false;
 }
 
-fn push_line_wrapped(
+/// Finish a statement body already written into `out` starting at `start`:
+/// wrap if it overflows, attach the inline comment, and terminate the line.
+/// The common (fits, no comment) case appends nothing but a newline — the
+/// body is already in place, so no intermediate `String` is built.
+fn emit_wrapped(
     out: &mut String,
-    line: &str,
+    start: usize,
     inline_comment: Option<&str>,
     opts: &FormatOptions,
     dialect: &dyn Dialect,
-    _depth: usize,
     first: &mut bool,
     prev_was_blank: &mut bool,
 ) {
-    if line.is_empty() {
-        return;
+    if out.len() == start {
+        return; // empty body — nothing to emit
     }
 
-    // Keep the inline comment on its own final line when it would otherwise
-    // overflow: a `+` continuation of `$ ...`/`; ...` is not itself a comment
-    // in SPICE, so carrying comment text across would turn it back into code.
-    let (body, comment) = match inline_comment {
-        Some(c) => (line.to_string(), Some(c.to_string())),
-        None => (line.to_string(), None),
-    };
-    let wrapped = wrap_line(&body, opts.max_width, dialect.continuation_indent());
-    let wrapped_len = wrapped.rsplit('\n').next().map(str::len).unwrap_or(0);
-    let full = match comment {
+    let body_len = out.len() - start;
+    let needs_wrap = body_len > opts.max_width;
+
+    match inline_comment {
         Some(c) => {
-            if wrapped.contains('\n') {
+            // Pull the body out so wrap/comment logic can reformat it. This
+            // path is rare (inline comments are uncommon), so a copy here is
+            // fine.
+            let body = out[start..].to_string();
+            out.truncate(start);
+            let wrapped = wrap_line(&body, opts.max_width, dialect.continuation_indent());
+            let wrapped_len = wrapped.rsplit('\n').next().map(str::len).unwrap_or(0);
+            let full = if wrapped.contains('\n') {
                 format!("{wrapped}\n{}{}", dialect.continuation_indent(), c)
             } else if wrapped_len + 1 + c.len() > opts.max_width {
                 // Body fits but the comment would push past the margin —
@@ -193,21 +207,37 @@ fn push_line_wrapped(
                 format!("{wrapped}\n{}{delim} {text}", dialect.continuation_indent())
             } else {
                 format!("{wrapped} {c}")
+            };
+            out.push_str(&full);
+            if !full.ends_with('\n') {
+                out.push('\n');
             }
         }
-        None => wrapped,
-    };
-    out.push_str(&full);
-    if !full.ends_with('\n') {
-        out.push('\n');
+        None => {
+            if needs_wrap {
+                // Over-width with no comment: lift the body, wrap, put back.
+                let body = out[start..].to_string();
+                out.truncate(start);
+                let wrapped = wrap_line(&body, opts.max_width, dialect.continuation_indent());
+                out.push_str(&wrapped);
+            }
+            // The body is already in `out`; just terminate the line. `wrap_line`
+            // never produces a trailing newline, and neither does the direct
+            // writer, so one newline is always correct.
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
     }
     *first = false;
     *prev_was_blank = false;
 }
 
-fn wrap_line(line: &str, max_width: usize, cont: &str) -> String {
+/// Wrap at `max_width`, borrowing the input when it already fits (the common
+/// case) so short lines are emitted with zero copies.
+fn wrap_line<'a>(line: &'a str, max_width: usize, cont: &str) -> Cow<'a, str> {
     if line.len() <= max_width {
-        return line.to_string();
+        return Cow::Borrowed(line);
     }
     let tokens = tokenize_for_wrap(line);
     let mut lines: Vec<String> = Vec::new();
@@ -228,7 +258,7 @@ fn wrap_line(line: &str, max_width: usize, cont: &str) -> String {
         lines.push(cur);
     }
     if lines.is_empty() {
-        return String::new();
+        return Cow::Borrowed("");
     }
     let mut out = lines[0].clone();
     for l in lines.iter().skip(1) {
@@ -236,7 +266,7 @@ fn wrap_line(line: &str, max_width: usize, cont: &str) -> String {
         out.push_str(cont);
         out.push_str(l);
     }
-    out
+    Cow::Owned(out)
 }
 
 fn tokenize_for_wrap(line: &str) -> Vec<String> {
@@ -269,38 +299,38 @@ fn tokenize_for_wrap(line: &str) -> Vec<String> {
     out
 }
 
-fn format_directive(d: &Directive, dialect: &dyn Dialect) -> String {
-    let mut s = format!(".{}", d.name.to_ascii_lowercase());
+fn format_directive_into(d: &Directive, dialect: &dyn Dialect, out: &mut String) {
+    out.push('.');
+    out.push_str(&d.name.to_ascii_lowercase());
     for a in &d.args {
-        s.push(' ');
-        s.push_str(a);
+        out.push(' ');
+        out.push_str(a);
     }
     for p in normalize_params(&d.params, false) {
-        s.push(' ');
-        s.push_str(&format_param(&p, dialect));
+        out.push(' ');
+        out.push_str(&format_param(&p, dialect));
     }
-    s
 }
 
-fn format_instance(inst: &Instance, dialect: &dyn Dialect) -> String {
-    let mut s = inst.name.clone();
+fn format_instance_into(inst: &Instance, dialect: &dyn Dialect, out: &mut String) {
+    out.push_str(&inst.name);
     for n in &inst.nodes {
-        s.push(' ');
-        s.push_str(n);
+        out.push(' ');
+        out.push_str(n);
     }
     if let Some(m) = &inst.model_or_value {
-        s.push(' ');
-        s.push_str(m);
+        out.push(' ');
+        out.push_str(m);
     }
     for p in normalize_params(&inst.params, false) {
-        s.push(' ');
-        s.push_str(&format_param(&p, dialect));
+        out.push(' ');
+        out.push_str(&format_param(&p, dialect));
     }
-    s
 }
 
-fn format_subckt_header(s: &Subckt, dialect: &dyn Dialect) -> String {
-    let mut out = format!(".subckt {}", s.name);
+fn format_subckt_header_into(s: &Subckt, dialect: &dyn Dialect, out: &mut String) {
+    out.push_str(".subckt ");
+    out.push_str(&s.name);
     for p in &s.ports {
         out.push(' ');
         out.push_str(p);
@@ -309,40 +339,38 @@ fn format_subckt_header(s: &Subckt, dialect: &dyn Dialect) -> String {
         out.push(' ');
         out.push_str(&format_param(&param, dialect));
     }
-    out
 }
 
-fn format_param(p: &Param, dialect: &dyn Dialect) -> String {
-    let v = p.value.trim();
-    if v.is_empty() {
+fn format_param<'a>(p: &Param<'a>, dialect: &dyn Dialect) -> Cow<'a, str> {
+    // Values are trim-normalized at parse time (and again in `normalize_params`),
+    // so no trim is needed here — which lets the empty-value case borrow the
+    // key instead of cloning it.
+    if p.value.is_empty() {
         p.key.clone()
     } else if dialect.space_around_eq() {
-        format!("{} = {}", p.key, v)
+        Cow::Owned(format!("{} = {}", p.key, p.value))
     } else {
-        format!("{}={}", p.key, v)
+        Cow::Owned(format!("{}={}", p.key, p.value))
     }
 }
 
-fn normalize_params(params: &[Param], sort: bool) -> Vec<Param> {
-    let mut out: Vec<Param> = params
+fn normalize_params<'a>(params: &[Param<'a>], sort: bool) -> Vec<Param<'a>> {
+    let mut out: Vec<Param<'a>> = params
         .iter()
-        .map(|p| Param {
-            key: p.key.clone(),
-            value: normalize_value(&p.value),
+        .map(|p| {
+            // Trim while preserving the borrow: a borrowed value stays borrowed
+            // (trim returns a subslice), an owned value is copied.
+            let value = match &p.value {
+                Cow::Borrowed(b) => Cow::Borrowed(b.trim()),
+                Cow::Owned(o) => Cow::Owned(o.trim().to_string()),
+            };
+            Param { key: p.key.clone(), value }
         })
         .collect();
     if sort {
         out.sort_by(|a, b| a.key.cmp(&b.key));
     }
     out
-}
-
-fn normalize_value(v: &str) -> String {
-    let t = v.trim();
-    if (t.starts_with('\'') && t.ends_with('\'')) || (t.starts_with('"') && t.ends_with('"')) {
-        return t.to_string();
-    }
-    t.to_string()
 }
 
 fn normalize_comment(c: &str) -> String {

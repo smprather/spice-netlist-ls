@@ -1,55 +1,120 @@
+use std::borrow::Cow;
+
+/// Parsed netlist. Borrows token text from the input wherever possible;
+/// only synthesized text (lowercased directive names, continuation-joined
+/// lines) is owned.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct File {
-    pub stmts: Vec<Stmt>,
+pub struct File<'a> {
+    pub stmts: Vec<Stmt<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Stmt {
+pub enum Stmt<'a> {
     Blank,
-    Comment(String),
-    Directive(Directive),
-    Instance(Instance),
-    Subckt(Subckt),
+    Comment(Cow<'a, str>),
+    Directive(Directive<'a>),
+    Instance(Instance<'a>),
+    Subckt(Subckt<'a>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Directive {
-    pub name: String,
-    pub args: Vec<String>,
-    pub params: Vec<Param>,
-    pub inline_comment: Option<String>,
+pub struct Directive<'a> {
+    pub name: Cow<'a, str>,
+    pub args: Vec<Cow<'a, str>>,
+    pub params: Vec<Param<'a>>,
+    pub inline_comment: Option<Cow<'a, str>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Instance {
-    pub name: String,
-    pub nodes: Vec<String>,
-    pub model_or_value: Option<String>,
-    pub params: Vec<Param>,
-    pub inline_comment: Option<String>,
+pub struct Instance<'a> {
+    pub name: Cow<'a, str>,
+    pub nodes: Vec<Cow<'a, str>>,
+    pub model_or_value: Option<Cow<'a, str>>,
+    pub params: Vec<Param<'a>>,
+    pub inline_comment: Option<Cow<'a, str>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Param {
-    pub key: String,
-    pub value: String,
+pub struct Param<'a> {
+    pub key: Cow<'a, str>,
+    pub value: Cow<'a, str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Subckt {
-    pub name: String,
-    pub ports: Vec<String>,
-    pub params: Vec<Param>,
-    pub body: Vec<Stmt>,
-    pub inline_comment: Option<String>,
+pub struct Subckt<'a> {
+    pub name: Cow<'a, str>,
+    pub ports: Vec<Cow<'a, str>>,
+    pub params: Vec<Param<'a>>,
+    pub body: Vec<Stmt<'a>>,
+    pub inline_comment: Option<Cow<'a, str>>,
     /// Name token carried by the original `.ends <name>` line when it differs
     /// from `name`. When `Some`, the formatter emits `.ends <ends_name>` so
     /// a mismatch is preserved across round-trips (the linter warns).
-    pub ends_name: Option<String>,
+    pub ends_name: Option<Cow<'a, str>>,
 }
 
-impl File {
-    pub fn new(stmts: Vec<Stmt>) -> Self {
+impl<'a> File<'a> {
+    pub fn new(stmts: Vec<Stmt<'a>>) -> Self {
         Self { stmts }
+    }
+}
+
+/// Deep-convert to an owned (`'static`) tree. Used for statements parsed
+/// from continuation-joined text, which does not live in the input.
+fn owned(c: Cow<'_, str>) -> Cow<'static, str> {
+    Cow::Owned(c.into_owned())
+}
+
+impl Stmt<'_> {
+    pub fn into_owned(self) -> Stmt<'static> {
+        match self {
+            Stmt::Blank => Stmt::Blank,
+            Stmt::Comment(c) => Stmt::Comment(owned(c)),
+            Stmt::Directive(d) => Stmt::Directive(d.into_owned()),
+            Stmt::Instance(i) => Stmt::Instance(i.into_owned()),
+            Stmt::Subckt(s) => Stmt::Subckt(s.into_owned()),
+        }
+    }
+}
+
+impl Directive<'_> {
+    pub fn into_owned(self) -> Directive<'static> {
+        Directive {
+            name: owned(self.name),
+            args: self.args.into_iter().map(owned).collect(),
+            params: self.params.into_iter().map(Param::into_owned).collect(),
+            inline_comment: self.inline_comment.map(owned),
+        }
+    }
+}
+
+impl Instance<'_> {
+    pub fn into_owned(self) -> Instance<'static> {
+        Instance {
+            name: owned(self.name),
+            nodes: self.nodes.into_iter().map(owned).collect(),
+            model_or_value: self.model_or_value.map(owned),
+            params: self.params.into_iter().map(Param::into_owned).collect(),
+            inline_comment: self.inline_comment.map(owned),
+        }
+    }
+}
+
+impl Param<'_> {
+    pub fn into_owned(self) -> Param<'static> {
+        Param { key: owned(self.key), value: owned(self.value) }
+    }
+}
+
+impl Subckt<'_> {
+    pub fn into_owned(self) -> Subckt<'static> {
+        Subckt {
+            name: owned(self.name),
+            ports: self.ports.into_iter().map(owned).collect(),
+            params: self.params.into_iter().map(Param::into_owned).collect(),
+            body: self.body.into_iter().map(Stmt::into_owned).collect(),
+            inline_comment: self.inline_comment.map(owned),
+            ends_name: self.ends_name.map(owned),
+        }
     }
 }

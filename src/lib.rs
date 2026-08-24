@@ -3,6 +3,7 @@ pub mod config;
 pub mod detect;
 pub mod dialect;
 pub mod formatter;
+mod fx;
 pub mod ir;
 pub mod linter;
 pub mod parser;
