@@ -117,8 +117,13 @@ jobs:
           pattern: artifacts-*
           path: artifacts
           merge-multiple: true
-      - name: Drop granular manifests
-        run: rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
+      - name: Drop granular manifests and unpacked dirs
+        run: |
+          rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
+          # cargo-dist writes both the .tar.xz/.zip archives AND an unpacked
+          # <target>/ directory per target; `gh release create` can't upload
+          # directories, so keep only the archives and their checksums.
+          rm -rf artifacts/spice-netlist-ls-*/
       - name: Create GitHub Release
         env:
           TAG: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag || github.ref_name }}
