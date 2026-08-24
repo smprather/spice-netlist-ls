@@ -3,11 +3,10 @@ source: tests/scs_segments.rs
 expression: "lint(\"lang_mixed.scs\")"
 ---
 7:1: warning [floating-node]: node 'in' is connected to only one element
-9:1: warning [duplicate-instance]: duplicate instance 'simulator' (first defined on line 1)
 12:1: warning [floating-node]: node '(vdd' is connected to only one element
 13:1: warning [floating-node]: node '(d' is connected to only one element
 13:1: warning [floating-node]: node 'g' is connected to only one element
 14:1: warning [dangling-rc-endpoint]: node '(a' terminates a passive network with no other connection
 14:1: warning [dangling-rc-endpoint]: node 'b)' terminates a passive network with no other connection
-15:1: warning [duplicate-instance]: duplicate instance 'simulator' (first defined on line 1)
+17:1: warning [dangling-rc-endpoint]: node 'a' terminates a passive network with no other connection
 17:1: warning [dangling-rc-endpoint]: node 'b' terminates a passive network with no other connection

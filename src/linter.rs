@@ -222,7 +222,70 @@ pub struct LintOptions {
 }
 
 /// Lint a single file's text. Pure: no filesystem access.
+///
+/// If the file contains `simulator lang=` directives, each section is linted
+/// under its own dialect and diagnostic line numbers are offset to global
+/// coordinates. `external_subckts` is unioned across sections (subckts
+/// defined in a spice section are visible to a spectre section and vice
+/// versa — they share a namespace within the file). If the file has no
+/// `simulator lang=` line, the fast path lints the whole file under one
+/// dialect, byte-identical to today's behavior.
 pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> Vec<Diagnostic> {
+    let fallback = dialect.kind();
+    let secs = crate::segments::segments(input, fallback);
+
+    // Fast path: no `simulator lang=` directive → today's code path, unchanged.
+    if secs.len() == 1 && secs[0].header.is_none() {
+        let empty = FxHashMap::default();
+        return lint_str_single(input, dialect, opts, &empty);
+    }
+
+    // Sectioned path: lint each body under its dialect, offsetting line
+    // numbers to global coordinates. external_subckts from includes is
+    // already dialect-agnostic at the file level (it walks the include tree
+    // with one dialect); the per-section def map covers same-file defs.
+    //
+    // Subckts defined in one section are visible to X-instances in any other
+    // section (they share a namespace within the file), so pre-scan every
+    // section for `.subckt` defs under its own dialect and merge them into a
+    // shared map passed to each section's lint pass.
+    let mut cross_defs: FxHashMap<String, usize> = FxHashMap::default();
+    for sec in &secs {
+        let sub_dialect = crate::dialect::get_dialect(sec.dialect);
+        let (defs, _incs) = crate::parser::scan_subckt_defs_and_includes(sec.body, sub_dialect.as_ref());
+        for (name, ports) in defs {
+            cross_defs.insert(name, ports);
+        }
+    }
+
+    let mut diags = Vec::new();
+    for sec in &secs {
+        let sub_dialect = crate::dialect::get_dialect(sec.dialect);
+        for mut d in lint_str_single(sec.body, &sub_dialect, opts, &cross_defs) {
+            d.range.start_line += sec.line_offset as u32;
+            d.range.end_line += sec.line_offset as u32;
+            diags.push(d);
+        }
+    }
+
+    diags.sort_by_key(|d| (d.range.start_line, d.range.start_col));
+    diags.dedup_by(|a, b| a.code == b.code && a.range == b.range && a.message == b.message);
+    diags
+}
+
+/// Lint a single section's body text under one dialect. Pure: no filesystem
+/// access. Line numbers are within `input` (0-based); the section-aware
+/// wrapper offsets them to global coordinates. `cross_defs` carries
+/// `.subckt` definitions from *other* sections of the same file so X-instance
+/// resolution sees the file-wide namespace (defs found in this section are
+/// discovered during the walk and override `cross_defs` for open-subckt
+/// tracking, but either way the port count is what matters for arity checks).
+fn lint_str_single(
+    input: &str,
+    dialect: &Arc<dyn Dialect>,
+    opts: &LintOptions,
+    cross_defs: &FxHashMap<String, usize>,
+) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
     // name(lowercase) -> (port_count, def_line)
@@ -424,17 +487,20 @@ pub fn lint_str(input: &str, dialect: &Arc<dyn Dialect>, opts: &LintOptions) -> 
         let key = r.to_ascii_lowercase();
         let known_ports: Option<usize> = match subckt_defs.get(&key) {
             Some(&(ports, _)) => Some(ports),
-            None => match opts.external_subckts.get(&key) {
-                None => {
-                    diags.push(Diagnostic {
-                        range: line_range(*line as u32, r.len() as u32),
-                        severity: Severity::Error,
-                        code: "undefined-subckt",
-                        message: format!("subckt '{r}' is not defined in this file or its includes"),
-                    });
-                    continue;
-                }
-                Some(ports) => *ports,
+            None => match cross_defs.get(&key) {
+                Some(&ports) => Some(ports),
+                None => match opts.external_subckts.get(&key) {
+                    None => {
+                        diags.push(Diagnostic {
+                            range: line_range(*line as u32, r.len() as u32),
+                            severity: Severity::Error,
+                            code: "undefined-subckt",
+                            message: format!("subckt '{r}' is not defined in this file or its includes"),
+                        });
+                        continue;
+                    }
+                    Some(ports) => *ports,
+                },
             },
         };
         if let Some(ports) = known_ports
@@ -765,5 +831,119 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
         let mut sorted = lines.clone();
         sorted.sort();
         assert_eq!(lines, sorted);
+    }
+
+    // ---------- per-section dialect switching (PLAN_scs_segments.md) ----------
+
+    fn spectre_dialect() -> Arc<dyn Dialect> {
+        get_dialect(DialectKind::Spectre)
+    }
+
+    #[test]
+    fn sectioned_lint_offsets_line_numbers_to_global() {
+        // A floating node in the *second* (spectre) section must report the
+        // global line, not the within-section line. The spice section defines
+        // `inv` (4 ports); the spectre section instantiates it across the
+        // section boundary via the cross_defs map.
+        let input = "\
+simulator lang=spice
+.subckt inv a y vdd vss
+Mn y a vss vss nch w=1u
+Mp y a vdd vdd pch w=2u
+.ends
+simulator lang=spectre
+// spectre section
+Xinv in out vdd gnd inv
+";
+        let diags = lint_str(input, &spectre_dialect(), &LintOptions::default());
+        // `in` appears once (in the Xinv in the spectre section at global
+        // line 7). The within-section line would be 1; the global must be 7.
+        let floating = diags
+            .iter()
+            .find(|d| d.code == "floating-node" && d.message.contains("'in'"));
+        assert!(floating.is_some(), "no floating-node 'in': {:?}", codes(&diags));
+        assert_eq!(
+            floating.unwrap().range.start_line, 7,
+            "second-section diagnostic must use global line number"
+        );
+    }
+
+    #[test]
+    fn sectioned_lint_resolves_subckt_across_section_boundary() {
+        // A subckt defined in a spice section is visible to an X-instance in
+        // a spectre section of the same file (cross_defs union). Arity is
+        // checked against the spice def's port count.
+        let input = "\
+simulator lang=spice
+.subckt inv a y vdd vss
+Mn y a vss vss nch w=1u
+.ends
+simulator lang=spectre
+X1 p q r s inv
+";
+        let diags = lint_str(input, &spectre_dialect(), &LintOptions::default());
+        // inv is defined in the spice section with 4 ports; X1 passes 4
+        // nodes → no undefined-subckt, no arity-mismatch.
+        assert!(
+            !codes(&diags).contains(&"undefined-subckt"),
+            "cross-section def should resolve: {:?}",
+            codes(&diags)
+        );
+        assert!(
+            !codes(&diags).contains(&"arity-mismatch"),
+            "4-port def vs 4-node instance: {:?}",
+            codes(&diags)
+        );
+    }
+
+    #[test]
+    fn sectioned_lint_reports_arity_mismatch_across_boundary() {
+        let input = "\
+simulator lang=spice
+.subckt two a b
+.ends
+simulator lang=spectre
+X1 p q r two
+";
+        let diags = lint_str(input, &spectre_dialect(), &LintOptions::default());
+        // `two` has 2 ports; X1 passes 3 nodes → arity-mismatch (not undefined).
+        assert!(codes(&diags).contains(&"arity-mismatch"));
+        assert!(!codes(&diags).contains(&"undefined-subckt"));
+    }
+
+    #[test]
+    fn sectioned_lint_simulator_header_not_parsed_as_instance() {
+        // Before the fix, `simulator lang=spectre` was parsed as an instance
+        // named `simulator`, producing a spurious `duplicate-instance` on the
+        // second header. The segmenter excludes headers from bodies, so no
+        // instance diagnostic should mention 'simulator'.
+        let input = "\
+simulator lang=spice
+R1 a b 1k
+simulator lang=spectre
+R2 c d 2k
+";
+        let diags = lint_str(input, &spectre_dialect(), &LintOptions::default());
+        assert!(
+            !diags.iter().any(|d| d.message.contains("'simulator'")),
+            "header parsed as instance: {:?}",
+            codes(&diags)
+        );
+    }
+
+    #[test]
+    fn plain_deck_lint_is_byte_identical_to_pre_segmentation() {
+        // Fast path: no `simulator lang=` → single-section, no header. The
+        // diagnostic set must match what lint_str_single would produce
+        // directly (this is the no-regression guard for the linter).
+        let input = ".subckt buf o i\n.ends\nX1 p q buf\n";
+        let via_lint_str = lint_str(input, &hspice(), &LintOptions::default());
+        let empty = crate::fx::FxHashMap::default();
+        let via_single = lint_str_single(input, &hspice(), &LintOptions::default(), &empty);
+        assert_eq!(
+            codes(&via_lint_str),
+            codes(&via_single),
+            "fast path must match single-section lint exactly"
+        );
     }
 }
