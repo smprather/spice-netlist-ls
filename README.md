@@ -38,6 +38,20 @@ implementation of the trait because its manual pins the base syntax down precise
 Other dialects override these defaults where they differ (Spectre-SPICE emits
 `key=value`, ngspice and ltspice use `;` inline comments, Spectre-SPICE uses `//`).
 
+### `.scs` per-section dialect switching
+
+A `.scs` (Spectre netlist) file can mix dialects with `simulator lang=spice` /
+`simulator lang=spectre` directives: each directive switches the active dialect
+for the lines that follow, and the formatter/linter routes each section to the
+right existing dialect (`spice` → ngspice grammar, `spectre` → Spectre-SPICE
+grammar). The directive lines themselves are structural (not comments) and pass
+through the formatter verbatim. Subckts defined in one section are visible to
+instantiations in any other section of the same file; includes are walked under
+each section's dialect. `--dialect`/`spicefmt.toml` set only the *fallback*
+dialect for the implicit pre-switch section; explicit `simulator lang=` lines in
+the file always win per-section. Plain files with no `simulator lang=` directive
+are unaffected — they take the single-dialect fast path byte-identical to before.
+
 ## Usage
 
 ```bash

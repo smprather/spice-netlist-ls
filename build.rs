@@ -16,7 +16,11 @@ enum LintFormat {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "spicefmt", about = "Highly opinionated SPICE formatter — HSPICE golden, dialect-extensible")]
+#[command(
+    name = "spicefmt",
+    about = "Highly opinionated SPICE formatter — HSPICE golden, dialect-extensible",
+    after_help = "In .scs files, `simulator lang=spice`/`lang=spectre` switch the active dialect per section; --dialect sets only the fallback for the implicit pre-switch section."
+)]
 #[command(group(
     clap::ArgGroup::new("mode")
         .args(["check", "write", "lint", "print_dialect"])

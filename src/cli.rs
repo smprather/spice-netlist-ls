@@ -35,7 +35,8 @@ pub enum LintFormat {
 #[command(
     name = "spicefmt",
     version,
-    about = "Opinionated SPICE netlist formatter and linter — dialect-extensible (hspice, ngspice, spectre, ltspice)"
+    about = "Opinionated SPICE netlist formatter and linter — dialect-extensible (hspice, ngspice, spectre, ltspice)",
+    after_help = "In .scs files, `simulator lang=spice`/`lang=spectre` switch the active dialect per section; --dialect sets only the fallback for the implicit pre-switch section."
 )]
 #[command(group(
     clap::ArgGroup::new("mode")
