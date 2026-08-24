@@ -7,6 +7,7 @@ mod fx;
 pub mod ir;
 pub mod linter;
 pub mod parser;
+pub mod segments;
 
 pub use detect::{DialectScores, detect_dialect, score_dialect};
 pub use dialect::{Dialect, DialectKind, get_dialect};
