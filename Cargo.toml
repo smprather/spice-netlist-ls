@@ -1,6 +1,6 @@
 [package]
 name = "spice-netlist-ls"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Highly opinionated SPICE formatter and language server — HSPICE golden reference, dialect-extensible"
 license = "MIT"
@@ -63,6 +63,10 @@ globset = "0.4"
 [dev-dependencies]
 insta = { version = "1.38", features = ["toml"] }
 tempfile = "3"
+# Used only by examples/perf_probe.rs to transparently decompress the committed
+# bzip2-compressed perf deck. A dev-dependency so it never lands in the shipped
+# musl binaries.
+bzip2 = "0.5"
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

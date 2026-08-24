@@ -27,8 +27,3 @@ manuals/
 
 # bundled binaries for the python wheel (build artifacts, not source)
 /src/spice_netlist_ls/bin/
-
-# Large/local perf scratch fixtures (not shipped; keep testdata/ hand-written
-# decks, ignore generated decks and nested checkouts used for ad-hoc profiling)
-/testdata/auto_clock_0.sp
-/testdata/ddp/
