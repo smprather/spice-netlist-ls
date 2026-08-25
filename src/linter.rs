@@ -291,6 +291,9 @@ fn lint_str_single(
     // Format-derived blank-line rules (ruff-inspired, fixable via formatter).
     // These are emitted here so `spicefmt --lint` reports the same violations
     // the formatter would fix. Codes are the same as `[format] ignore` names.
+    // Other format rules (lowercase-directive, eq-spacing, line-wrap, etc.)
+    // are formatter-only and not reported as lint to avoid noise; they are
+    // still opt-out via [format] ignore for the formatter.
     lint_blank_rules(input, &mut diags);
 
     // name(lowercase) -> (port_count, def_line)
@@ -387,7 +390,7 @@ fn lint_str_single(
                     }
                 }
             }
-            Stmt::Directive(d) if d.name == "ends" => {
+            Stmt::Directive(d) if d.name.eq_ignore_ascii_case("ends") => {
                 // Simulators close a subckt on any `.ends`; a name that does
                 // not match the open subckt is almost always a typo.
                 if let Some(ends_name) = d.args.first()
@@ -472,7 +475,7 @@ fn lint_str_single(
                     }
                 }
             }
-            Stmt::Directive(d) if matches!(d.name.as_ref(), "measure" | "meas" | "probe" | "print" | "plot" | "save") => {
+            Stmt::Directive(d) if matches!(d.name.to_ascii_lowercase().as_str(), "measure" | "meas" | "probe" | "print" | "plot" | "save") => {
                 collect_observed(&line_text, &mut nodes);
             }
             _ => {}
@@ -801,8 +804,8 @@ mod tests {
         let input = "\
 * title
 .subckt inv a y vdd vss
-Mn y a vss vss nch w=1u
-Mp y a vdd vdd pch w=2u
+Mn y a vss vss nch w = 1u
+Mp y a vdd vdd pch w = 2u
 .ends
 
 Xinv in out vdd gnd inv
@@ -876,7 +879,7 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
 
     #[test]
     fn subckt_port_used_once_in_body_is_not_floating() {
-        let input = ".subckt inv a y\nMn y a 0 0 nch w=1u\n.ends\n\n";
+        let input = ".subckt inv a y\nMn y a 0 0 nch w = 1u\n.ends\n\n";
         let diags = lint(input);
         assert_eq!(codes(&diags), Vec::<&'static str>::new());
     }

@@ -166,7 +166,10 @@ pub fn include_paths(input: &str, dialect: &dyn Dialect) -> Vec<String> {
             continue;
         }
         if let Stmt::Directive(d) = parse_logical_line(trimmed, dialect)
-            && matches!(d.name.as_ref(), "include" | "inc" | "lib")
+            && matches!(
+                d.name.to_ascii_lowercase().as_str(),
+                "include" | "inc" | "lib"
+            )
             && let Some(first) = d.args.first()
         {
             let p = first.trim_matches(['"', '\'']);
@@ -206,7 +209,11 @@ pub(crate) fn scan_subckt_defs_and_includes(
                 defs.push((s.name.to_ascii_lowercase(), s.ports.len()));
             }
             Stmt::Directive(d)
-                if is_include && matches!(d.name.as_ref(), "include" | "inc" | "lib") =>
+                if is_include
+                    && matches!(
+                        d.name.to_ascii_lowercase().as_str(),
+                        "include" | "inc" | "lib"
+                    ) =>
             {
                 if let Some(first) = d.args.first() {
                     let p = first.trim_matches(['"', '\'']);
@@ -315,10 +322,10 @@ fn parse_directive<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> S
             inline_comment,
         });
     }
-    let name = tokens.remove(0).to_ascii_lowercase();
+    let name = tokens.remove(0);
     let (args, params) = split_args_params(tokens);
     Stmt::Directive(Directive {
-        name: Cow::Owned(name),
+        name: Cow::Borrowed(name),
         args,
         params,
         inline_comment,

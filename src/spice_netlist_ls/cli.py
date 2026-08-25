@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover - fallback for minimal offline without r
 # Reuse binary resolution from the package.
 from . import find_binary
 
-_PKG_VERSION = "0.4.0"
+_PKG_VERSION = "0.5.0"
 
 
 # ---------------------------------------------------------------------------

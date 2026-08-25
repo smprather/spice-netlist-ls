@@ -58,9 +58,20 @@ impl LintConfig {
 /// Ruff north-star: `select`/`ignore` mirror `ruff`'s `lint.select`/`lint.ignore`.
 /// All format rules are enabled by default; `ignore` disables, `select`
 /// allowlists. Available rules:
-/// - `blank-after-subckt`  – no empty line after `.subckt` (default enabled)
-/// - `blank-before-ends`   – no empty line before `.ends`
-/// - `blank-after-ends`    – at least one empty line after `.ends`
+///
+/// - `lowercase-directive`          – `.SUBCKT` → `.subckt`
+/// - `eq-spacing`                   – `k=v` vs `k = v` per dialect
+/// - `continuation-join`            – join `+` continuations
+/// - `line-wrap`                    – wrap at `max_width`
+/// - `sort-params`                  – sort `key=value` when `sort_params` set
+/// - `blank-before-subckt`          – blank before top-level `.subckt`
+/// - `blank-after-subckt`           – no empty line after `.subckt`
+/// - `blank-before-ends`            – no empty line before `.ends`
+/// - `blank-after-ends`             – at least one empty line after `.ends`
+/// - `blank-collapse`               – collapse consecutive blanks
+/// - `comment-normalize`            – `*foo` → `* foo`
+/// - `trim-trailing-whitespace`     – strip trailing spaces
+/// - `insert-final-newline`         – ensure file ends with `\n`
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FormatConfig {

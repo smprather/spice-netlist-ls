@@ -251,7 +251,10 @@ sort_params = true    # sort key=value params after positional args
 # Formatter is opinionated but ruff-inspired opt-out is available:
 [format]
 # Disable specific formatting rules (all enabled by default)
-# Available: blank-after-subckt, blank-before-ends, blank-after-ends
+# Available: lowercase-directive, eq-spacing, continuation-join,
+#   line-wrap, sort-params, blank-before-subckt, blank-after-subckt,
+#   blank-before-ends, blank-after-ends, blank-collapse,
+#   comment-normalize, trim-trailing-whitespace, insert-final-newline
 ignore = ["blank-after-subckt"]   # keep your empty line after .subckt
 # select = ["blank-after-ends"]   # allowlist – only these run
 
@@ -262,6 +265,8 @@ ignore = ["blank-after-subckt"]   # keep your empty line after .subckt
 # dangling-rc-endpoint, duplicate-instance, unterminated-subckt,
 # stray-ends, ends-name-mismatch, node-case-collision, orphan-continuation,
 # plus the three blank-line codes above (reported by `spicefmt --lint`).
+# Format-only rules (lowercase-directive, eq-spacing, etc.) are not reported
+# as lint – they are fixed by the formatter and opt-out via [format] ignore.
 ignore = ["blank-before-ends"]    # don't warn about blank before .ends
 # select = ["blank-after-ends"]   # only warn about that one
 # severity overrides: "code" = "error" | "warning"
@@ -274,13 +279,24 @@ CLI also supports ruff-style `--ignore`/`--select` (comma-separated or repeated)
 ```bash
 spicefmt --ignore blank-after-subckt,blank-before-ends file.sp
 spicefmt --lint --ignore blank-after-ends --format summary
+spicefmt --ignore lowercase-directive,eq-spacing --write file.sp
 ```
 
 Formatter rules (all fixable via `spicefmt` or `spicefmt --write`):
 
-- `blank-after-subckt`  – no empty lines after `.subckt` (nesting-aware: no blank after outer header before inner `.subckt`)
-- `blank-before-ends`   – no empty lines before `.ends`
-- `blank-after-ends`    – at least one empty line after `.ends` (top-level only; collapsed to one, `* prev_was_blank` dedup)
+- `lowercase-directive`          – `.SUBCKT` → `.subckt` (`src/formatter.rs:457`)
+- `eq-spacing`                   – `k=v` ↔ `k = v` per dialect (`src/formatter.rs:499`)
+- `continuation-join`            – `+` lines joined (`src/parser.rs:84`)
+- `line-wrap`                    – wrap at `max_width` (`src/formatter.rs:335`)
+- `sort-params`                  – sort `key=value` when `sort_params` (`src/formatter.rs:523`)
+- `blank-before-subckt`          – blank before top-level `.subckt` (`src/formatter.rs:230`)
+- `blank-after-subckt`           – no empty after `.subckt` (nesting-aware)
+- `blank-before-ends`            – no empty before `.ends`
+- `blank-after-ends`             – ≥1 empty after `.ends` (top-level, collapsed)
+- `blank-collapse`               – collapse consecutive blanks (`src/formatter.rs:192`)
+- `comment-normalize`            – `*foo` → `* foo` (`src/formatter.rs:531`)
+- `trim-trailing-whitespace`     – strip trailing spaces (`src/formatter.rs:145`)
+- `insert-final-newline`         – ensure `\n` at EOF (`src/formatter.rs:161`)
 
 `.editorconfig` files are honored too ([editorconfig.org](https://editorconfig.org)):
 `max_line_length`, `insert_final_newline`, and `trim_trailing_whitespace` apply to

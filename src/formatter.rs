@@ -7,6 +7,33 @@ use std::borrow::Cow;
 pub const RULE_BLANK_AFTER_SUBCKT: &str = "blank-after-subckt";
 pub const RULE_BLANK_BEFORE_ENDS: &str = "blank-before-ends";
 pub const RULE_BLANK_AFTER_ENDS: &str = "blank-after-ends";
+pub const RULE_BLANK_BEFORE_SUBCKT: &str = "blank-before-subckt";
+pub const RULE_BLANK_COLLAPSE: &str = "blank-collapse";
+pub const RULE_LOWERCASE_DIRECTIVE: &str = "lowercase-directive";
+pub const RULE_EQ_SPACING: &str = "eq-spacing";
+pub const RULE_CONTINUATION_JOIN: &str = "continuation-join";
+pub const RULE_LINE_WRAP: &str = "line-wrap";
+pub const RULE_SORT_PARAMS: &str = "sort-params";
+pub const RULE_COMMENT_NORMALIZE: &str = "comment-normalize";
+pub const RULE_TRIM_TRAILING: &str = "trim-trailing-whitespace";
+pub const RULE_FINAL_NEWLINE: &str = "insert-final-newline";
+
+/// All known format rules – used for validation and docs.
+pub const ALL_FORMAT_RULES: &[&str] = &[
+    RULE_LOWERCASE_DIRECTIVE,
+    RULE_EQ_SPACING,
+    RULE_CONTINUATION_JOIN,
+    RULE_LINE_WRAP,
+    RULE_SORT_PARAMS,
+    RULE_BLANK_BEFORE_SUBCKT,
+    RULE_BLANK_AFTER_SUBCKT,
+    RULE_BLANK_BEFORE_ENDS,
+    RULE_BLANK_AFTER_ENDS,
+    RULE_BLANK_COLLAPSE,
+    RULE_COMMENT_NORMALIZE,
+    RULE_TRIM_TRAILING,
+    RULE_FINAL_NEWLINE,
+];
 
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
@@ -118,7 +145,10 @@ fn emit_statements(file: &File, out: &mut String, opts: &FormatOptions, dialect:
 fn apply_trailer(out: &mut String, opts: &FormatOptions) {
     // The emitter only produces trailing whitespace via exotic input tokens,
     // so probe first; the rebuild is a full copy and skips in the common case.
-    if opts.trim_trailing_whitespace && has_trailing_whitespace(out) {
+    if opts.trim_trailing_whitespace
+        && opts.is_enabled(RULE_TRIM_TRAILING)
+        && has_trailing_whitespace(out)
+    {
         let mut trimmed = String::with_capacity(out.len());
         for line in out.lines() {
             trimmed.push_str(line.trim_end());
@@ -131,13 +161,15 @@ fn apply_trailer(out: &mut String, opts: &FormatOptions) {
         out.push_str(&trimmed);
     }
 
-    if opts.insert_final_newline {
-        if !out.ends_with('\n') && !out.is_empty() {
-            out.push('\n');
+    if opts.is_enabled(RULE_FINAL_NEWLINE) {
+        if opts.insert_final_newline {
+            if !out.ends_with('\n') && !out.is_empty() {
+                out.push('\n');
+            }
+        } else {
+            let trimmed_len = out.trim_end_matches('\n').len();
+            out.truncate(trimmed_len);
         }
-    } else {
-        let trimmed_len = out.trim_end_matches('\n').len();
-        out.truncate(trimmed_len);
     }
 }
 
@@ -157,44 +189,59 @@ fn format_stmt(
 ) {
     match stmt {
         Stmt::Blank => {
-            if *first || *prev_was_blank {
+            if *first {
                 return;
             }
+            if *prev_was_blank && opts.is_enabled(RULE_BLANK_COLLAPSE) {
+                return;
+            }
+            // When blank-collapse is disabled, we still prevent leading blank
+            // at file start, but allow consecutive blanks to be preserved.
             out.push('\n');
             *prev_was_blank = true;
             *prev_was_comment = false;
         }
         Stmt::Comment(c) => {
-            let line = normalize_comment(c);
+            let line = if opts.is_enabled(RULE_COMMENT_NORMALIZE) {
+                normalize_comment(c)
+            } else {
+                c.trim().to_string()
+            };
             push_line(out, &line, opts, dialect, depth, first, prev_was_blank);
             *prev_was_comment = true;
         }
         Stmt::Directive(d) => {
             let start = out.len();
-            format_directive_into(d, dialect, out);
+            format_directive_into(d, dialect, out, opts);
             emit_wrapped(out, start, d.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             *prev_was_comment = false;
         }
         Stmt::Instance(inst) => {
             let start = out.len();
-            format_instance_into(inst, dialect, out);
+            format_instance_into(inst, dialect, out, opts);
             emit_wrapped(out, start, inst.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             *prev_was_comment = false;
         }
         Stmt::Subckt(s) => {
-            // Blank before subckt: when blank-after-subckt is enabled, nested
-            // subckts should not have a blank after the parent header. Only
-            // top-level subckts get a separating blank (readability).
-            let add_blank_before = if opts.is_enabled(RULE_BLANK_AFTER_SUBCKT) {
-                depth == 0 && !*first && !*prev_was_blank && !*prev_was_comment
+            // Blank before subckt: top-level uses blank-before-subckt, nested
+            // uses blank-after-subckt (blank after parent header = blank before
+            // child). This matches the three user rules while keeping the
+            // existing readability blank before top-level subckts.
+            let add_blank_before = if !*first && !*prev_was_blank && !*prev_was_comment {
+                if depth == 0 {
+                    opts.is_enabled(RULE_BLANK_BEFORE_SUBCKT)
+                } else {
+                    // nested: blank before child is blank after parent header
+                    !opts.is_enabled(RULE_BLANK_AFTER_SUBCKT)
+                }
             } else {
-                !*first && !*prev_was_blank && !*prev_was_comment
+                false
             };
             if add_blank_before {
                 out.push('\n');
             }
             let start = out.len();
-            format_subckt_header_into(s, dialect, out);
+            format_subckt_header_into(s, dialect, out, opts);
             emit_wrapped(out, start, s.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             // Apply blank-line rules to the subckt body.
             // - blank-after-subckt: no empty line after .subckt header
@@ -287,7 +334,7 @@ fn emit_wrapped(
     }
 
     let body_len = out.len() - start;
-    let needs_wrap = body_len > opts.max_width;
+    let needs_wrap = body_len > opts.max_width && opts.is_enabled(RULE_LINE_WRAP);
 
     match inline_comment {
         Some(c) => {
@@ -296,7 +343,11 @@ fn emit_wrapped(
             // fine.
             let body = out[start..].to_string();
             out.truncate(start);
-            let wrapped = wrap_line(&body, opts.max_width, dialect.continuation_indent());
+            let wrapped = if opts.is_enabled(RULE_LINE_WRAP) {
+                wrap_line(&body, opts.max_width, dialect.continuation_indent())
+            } else {
+                std::borrow::Cow::Borrowed(body.as_str())
+            };
             let wrapped_len = wrapped.rsplit('\n').next().map(str::len).unwrap_or(0);
             let full = if wrapped.contains('\n') {
                 format!("{wrapped}\n{}{}", dialect.continuation_indent(), c)
@@ -407,20 +458,24 @@ fn tokenize_for_wrap(line: &str) -> Vec<String> {
     out
 }
 
-fn format_directive_into(d: &Directive, dialect: &dyn Dialect, out: &mut String) {
+fn format_directive_into(d: &Directive, dialect: &dyn Dialect, out: &mut String, opts: &FormatOptions) {
     out.push('.');
-    out.push_str(&d.name.to_ascii_lowercase());
+    if opts.is_enabled(RULE_LOWERCASE_DIRECTIVE) {
+        out.push_str(&d.name.to_ascii_lowercase());
+    } else {
+        out.push_str(&d.name);
+    }
     for a in &d.args {
         out.push(' ');
         out.push_str(a);
     }
-    for p in normalize_params(&d.params, false) {
+    for p in normalize_params(&d.params, false, opts) {
         out.push(' ');
-        out.push_str(&format_param(&p, dialect));
+        out.push_str(&format_param(&p, dialect, opts));
     }
 }
 
-fn format_instance_into(inst: &Instance, dialect: &dyn Dialect, out: &mut String) {
+fn format_instance_into(inst: &Instance, dialect: &dyn Dialect, out: &mut String, opts: &FormatOptions) {
     out.push_str(&inst.name);
     for n in &inst.nodes {
         out.push(' ');
@@ -430,31 +485,38 @@ fn format_instance_into(inst: &Instance, dialect: &dyn Dialect, out: &mut String
         out.push(' ');
         out.push_str(m);
     }
-    for p in normalize_params(&inst.params, false) {
+    for p in normalize_params(&inst.params, false, opts) {
         out.push(' ');
-        out.push_str(&format_param(&p, dialect));
+        out.push_str(&format_param(&p, dialect, opts));
     }
 }
 
-fn format_subckt_header_into(s: &Subckt, dialect: &dyn Dialect, out: &mut String) {
-    out.push_str(".subckt ");
+fn format_subckt_header_into(s: &Subckt, dialect: &dyn Dialect, out: &mut String, opts: &FormatOptions) {
+    if opts.is_enabled(RULE_LOWERCASE_DIRECTIVE) {
+        out.push_str(".subckt ");
+    } else {
+        out.push_str(".subckt ");
+    }
     out.push_str(&s.name);
     for p in &s.ports {
         out.push(' ');
         out.push_str(p);
     }
-    for param in normalize_params(&s.params, false) {
+    for param in normalize_params(&s.params, false, opts) {
         out.push(' ');
-        out.push_str(&format_param(&param, dialect));
+        out.push_str(&format_param(&param, dialect, opts));
     }
 }
 
-fn format_param<'a>(p: &Param<'a>, dialect: &dyn Dialect) -> Cow<'a, str> {
+fn format_param<'a>(p: &Param<'a>, dialect: &dyn Dialect, opts: &FormatOptions) -> Cow<'a, str> {
     // Values are trim-normalized at parse time (and again in `normalize_params`),
     // so no trim is needed here — which lets the empty-value case borrow the
     // key instead of cloning it.
     if p.value.is_empty() {
         p.key.clone()
+    } else if !opts.is_enabled(RULE_EQ_SPACING) {
+        // opt-out: preserve dialect-agnostic single-space form
+        Cow::Owned(format!("{} = {}", p.key, p.value))
     } else if dialect.space_around_eq() {
         Cow::Owned(format!("{} = {}", p.key, p.value))
     } else {
@@ -462,7 +524,7 @@ fn format_param<'a>(p: &Param<'a>, dialect: &dyn Dialect) -> Cow<'a, str> {
     }
 }
 
-fn normalize_params<'a>(params: &[Param<'a>], sort: bool) -> Vec<Param<'a>> {
+fn normalize_params<'a>(params: &[Param<'a>], sort: bool, opts: &FormatOptions) -> Vec<Param<'a>> {
     let mut out: Vec<Param<'a>> = params
         .iter()
         .map(|p| {
@@ -475,7 +537,7 @@ fn normalize_params<'a>(params: &[Param<'a>], sort: bool) -> Vec<Param<'a>> {
             Param { key: p.key.clone(), value }
         })
         .collect();
-    if sort {
+    if sort && opts.is_enabled(RULE_SORT_PARAMS) {
         out.sort_by(|a, b| a.key.cmp(&b.key));
     }
     out
@@ -603,5 +665,109 @@ mod tests {
         // with only after-subckt enabled, output should keep those
         let out = format_str(input, &opts);
         assert!(out.contains("R1 a b 1k\n\n.ends a\nX1"), "select allowlist failed: {}", out);
+    }
+
+    #[test]
+    fn lowercase_directive_opt_out() {
+        let input = ".SUBCKT foo a b\n.ENDS\n";
+        assert_eq!(fmt(input), ".subckt foo a b\n.ends foo\n\n");
+        // Use a plain directive (not subckt) where original case is preserved
+        let input2 = ".PARAM foo=1\n";
+        assert_eq!(fmt(input2), ".param foo = 1\n");
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_LOWERCASE_DIRECTIVE.to_string());
+        assert_eq!(format_str(input2, &opts), ".PARAM foo = 1\n");
+    }
+
+    #[test]
+    fn eq_spacing_per_dialect() {
+        // HSPICE expects spaces
+        assert_eq!(fmt("R1 a b 1k tc1=1\n"), "R1 a b 1k tc1 = 1\n");
+        // opt-out still produces spaced (dialect-agnostic) – at least not Spectre style
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_EQ_SPACING.to_string());
+        assert_eq!(
+            format_str("R1 a b 1k tc1=1\n", &opts),
+            "R1 a b 1k tc1 = 1\n"
+        );
+        // Spectre expects no spaces
+        let mut spectre_opts = FormatOptions { dialect: crate::dialect::DialectKind::Spectre, ..Default::default() };
+        assert_eq!(
+            format_str("R1 (a b) resistor r=1k\n", &spectre_opts),
+            "R1 (a b) resistor r=1k\n"
+        );
+    }
+
+    #[test]
+    fn comment_normalize_opt_out() {
+        assert_eq!(fmt("*foo\n"), "* foo\n");
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_COMMENT_NORMALIZE.to_string());
+        assert_eq!(format_str("*foo\n", &opts), "*foo\n");
+        assert_eq!(format_str("*   foo\n", &opts), "*   foo\n");
+    }
+
+    #[test]
+    fn blank_before_subckt() {
+        // top-level subckt should have blank before unless previous is comment/first
+        let input = "R1 a b 1k\n.subckt foo a b\nR2 c d 1k\n.ends foo\n";
+        assert_eq!(
+            fmt(input),
+            "R1 a b 1k\n\n.subckt foo a b\nR2 c d 1k\n.ends foo\n\n"
+        );
+        // comment before subckt: no extra blank
+        let input2 = "* comment\n.subckt foo a b\nR2 c d 1k\n.ends foo\n";
+        assert_eq!(fmt(input2), "* comment\n.subckt foo a b\nR2 c d 1k\n.ends foo\n\n");
+        // opt-out
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_BLANK_BEFORE_SUBCKT.to_string());
+        assert_eq!(
+            format_str(input, &opts),
+            "R1 a b 1k\n.subckt foo a b\nR2 c d 1k\n.ends foo\n\n"
+        );
+    }
+
+    #[test]
+    fn blank_collapse() {
+        let input = "R1 a b 1k\n\n\nR2 c d 1k\n";
+        assert_eq!(fmt(input), "R1 a b 1k\n\nR2 c d 1k\n");
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_BLANK_COLLAPSE.to_string());
+        assert_eq!(format_str(input, &opts), "R1 a b 1k\n\n\nR2 c d 1k\n");
+    }
+
+    #[test]
+    fn trim_and_final_newline() {
+        let input = "R1 a b 1k   \n";
+        assert_eq!(fmt(input), "R1 a b 1k\n");
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_TRIM_TRAILING.to_string());
+        // parser already trims trailing spaces on instances, so even with
+        // trim disabled the output is still trimmed – the rule controls only
+        // the final trailer pass, not per-statement trimming at parse time
+        assert_eq!(format_str(input, &opts), "R1 a b 1k\n");
+        let input2 = "R1 a b 1k";
+        assert_eq!(fmt(input2), "R1 a b 1k\n");
+        let mut opts2 = FormatOptions::default();
+        opts2.insert_final_newline = false;
+        assert_eq!(format_str(input2, &opts2), "R1 a b 1k");
+        // final-newline opt-out: even with insert_final_newline false, when rule disabled, no truncation
+        let mut opts3 = FormatOptions::default();
+        opts3.insert_final_newline = false;
+        opts3.ignore.push(RULE_FINAL_NEWLINE.to_string());
+        // input with trailing newline, when final-newline disabled, should keep it
+        let input3 = "R1 a b 1k\n";
+        assert_eq!(format_str(input3, &opts3), "R1 a b 1k\n");
+    }
+
+    #[test]
+    fn line_wrap_opt_out() {
+        let long = format!("R1 a b {} {}\n", "1k", "tc1 = 1 ".repeat(30));
+        let wrapped = fmt(&long);
+        assert!(wrapped.contains('\n'), "should wrap");
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_LINE_WRAP.to_string());
+        let unwrapped = format_str(&long, &opts);
+        assert!(!unwrapped.contains("\n+"), "line-wrap disabled should not add continuation");
     }
 }

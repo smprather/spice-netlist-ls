@@ -94,10 +94,14 @@ pub struct Args {
     pub list_dialects: bool,
 
     /// Ruff-inspired: disable specific rules (comma-separated or repeated).
-    /// Available codes: blank-after-subckt, blank-before-ends, blank-after-ends,
-    /// plus lint codes (undefined-subckt, arity-mismatch, floating-node,
+    /// Format rules: lowercase-directive, eq-spacing, continuation-join,
+    /// line-wrap, sort-params, blank-before-subckt, blank-after-subckt,
+    /// blank-before-ends, blank-after-ends, blank-collapse, comment-normalize,
+    /// trim-trailing-whitespace, insert-final-newline.
+    /// Lint codes: undefined-subckt, arity-mismatch, floating-node,
     /// dangling-rc-endpoint, duplicate-instance, unterminated-subckt, stray-ends,
-    /// ends-name-mismatch, node-case-collision, orphan-continuation).
+    /// ends-name-mismatch, node-case-collision, orphan-continuation,
+    /// plus the blank-line format codes above when used via --lint.
     /// Example: --ignore blank-after-subckt,blank-before-ends
     #[arg(long, value_delimiter = ',', help = "Ignore rules (comma-separated)")]
     pub ignore: Vec<String>,
