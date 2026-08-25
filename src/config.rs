@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 /// Suppressed codes vanish from the detail listing but **still appear in
 /// summary counts** — a suppression that makes a finding disappear entirely
 /// is how a real problem gets lost when circumstances change.
+///
+/// Ruff-inspired: `ignore` is the preferred name (`suppress` kept for
+/// backwards compat). `select` allowlists which codes are enabled; if `select`
+/// is empty all codes are enabled minus `ignore`/`suppress`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LintConfig {
@@ -26,13 +30,58 @@ pub struct LintConfig {
     /// `floating-node`, ...). Counted in `--format summary`, marked as
     /// suppressed, and excluded from `--max-warnings`/`--error-on` math.
     pub suppress: Vec<String>,
+    /// Ruff-style alias for `suppress` – `ignore = ["code"]`.
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// Allowlist – if non-empty, only these codes are enabled.
+    #[serde(default)]
+    pub select: Vec<String>,
     /// Per-code severity override: `"code" = "error" | "warning"`.
     pub severity: std::collections::HashMap<String, String>,
 }
 
 impl LintConfig {
     pub fn is_suppressed(&self, code: &str) -> bool {
-        self.suppress.iter().any(|c| c == code)
+        self.suppress.iter().any(|c| c == code) || self.ignore.iter().any(|c| c == code)
+    }
+
+    pub fn is_enabled(&self, code: &str) -> bool {
+        if !self.select.is_empty() && !self.select.iter().any(|c| c == code) {
+            return false;
+        }
+        !self.is_suppressed(code)
+    }
+}
+
+/// Formatter policy from `spicefmt.toml`'s `[format]` table.
+///
+/// Ruff north-star: `select`/`ignore` mirror `ruff`'s `lint.select`/`lint.ignore`.
+/// All format rules are enabled by default; `ignore` disables, `select`
+/// allowlists. Available rules:
+/// - `blank-after-subckt`  – no empty line after `.subckt` (default enabled)
+/// - `blank-before-ends`   – no empty line before `.ends`
+/// - `blank-after-ends`    – at least one empty line after `.ends`
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FormatConfig {
+    /// Disable specific format rules (e.g. `ignore = ["blank-after-subckt"]`).
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// Allowlist – if non-empty, only these rules are enabled.
+    #[serde(default)]
+    pub select: Vec<String>,
+}
+
+impl FormatConfig {
+    pub fn is_ignored(&self, code: &str) -> bool {
+        self.ignore.iter().any(|c| c.eq_ignore_ascii_case(code))
+    }
+
+    pub fn is_enabled(&self, code: &str) -> bool {
+        if !self.select.is_empty() && !self.select.iter().any(|c| c.eq_ignore_ascii_case(code)) {
+            return false;
+        }
+        !self.is_ignored(code)
     }
 }
 
@@ -51,6 +100,9 @@ pub struct SpicefmtConfig {
     pub trim_trailing_whitespace: Option<bool>,
     /// Project lint policy.
     pub lint: LintConfig,
+    /// Formatter policy (ruff-inspired `select`/`ignore`).
+    #[serde(default)]
+    pub format: FormatConfig,
 }
 
 impl SpicefmtConfig {
@@ -71,6 +123,14 @@ impl SpicefmtConfig {
             && let Some(k) = dialect_from_str(d)
         {
             opts.dialect = k;
+        }
+        // Ruff-inspired format rule selection – config file wins over defaults,
+        // CLI flags (applied later) win over config.
+        if !self.format.ignore.is_empty() {
+            opts.ignore = self.format.ignore.clone();
+        }
+        if !self.format.select.is_empty() {
+            opts.select = self.format.select.clone();
         }
     }
 }
@@ -252,6 +312,11 @@ pub fn lint_config_for(path: &Path) -> LintConfig {
     load_config(path).map(|c| c.lint).unwrap_or_default()
 }
 
+/// The `[format]` policy table applying to `path` (default if no config).
+pub fn format_config_for(path: &Path) -> FormatConfig {
+    load_config(path).map(|c| c.format).unwrap_or_default()
+}
+
 /// CLI flags beat `spicefmt.toml`; `spicefmt.toml` beats `.editorconfig`;
 /// `.editorconfig` beats defaults. Auto-detected dialect fills the gap left
 /// by all of the above.
@@ -321,5 +386,46 @@ mod tests {
         let text = "[*]\nindent_style = space\nend_of_line = lf\n";
         let (cfg, _) = parse_editorconfig(text, "a.sp");
         assert_eq!(cfg, EditorConfig::default());
+    }
+
+    #[test]
+    fn format_ignore_parses() {
+        let text = "[format]\nignore = [\"blank-after-subckt\", \"blank-before-ends\"]\n";
+        let cfg: SpicefmtConfig = toml::from_str(text).unwrap();
+        assert!(cfg.format.is_ignored("blank-after-subckt"));
+        assert!(cfg.format.is_ignored("blank-before-ends"));
+        assert!(!cfg.format.is_ignored("blank-after-ends"));
+        assert!(cfg.format.is_enabled("blank-after-ends"));
+        assert!(!cfg.format.is_enabled("blank-after-subckt"));
+    }
+
+    #[test]
+    fn format_select_allowlist() {
+        let text = "[format]\nselect = [\"blank-after-ends\"]\n";
+        let cfg: SpicefmtConfig = toml::from_str(text).unwrap();
+        assert!(cfg.format.is_enabled("blank-after-ends"));
+        assert!(!cfg.format.is_enabled("blank-after-subckt"));
+        assert!(!cfg.format.is_enabled("blank-before-ends"));
+    }
+
+    #[test]
+    fn lint_ignore_alias_for_suppress() {
+        let text = "[lint]\nignore = [\"blank-after-subckt\"]\n";
+        let cfg: SpicefmtConfig = toml::from_str(text).unwrap();
+        assert!(cfg.lint.is_suppressed("blank-after-subckt"));
+        assert!(cfg.lint.is_enabled("blank-before-ends"));
+        let text2 = "[lint]\nsuppress = [\"floating-node\"]\n";
+        let cfg2: SpicefmtConfig = toml::from_str(text2).unwrap();
+        assert!(cfg2.lint.is_suppressed("floating-node"));
+    }
+
+    #[test]
+    fn format_options_respect_config() {
+        let text = "[format]\nignore = [\"blank-after-ends\"]\n";
+        let cfg: SpicefmtConfig = toml::from_str(text).unwrap();
+        let mut opts = crate::formatter::FormatOptions::default();
+        cfg.apply_to(&mut opts);
+        assert!(!opts.is_enabled("blank-after-ends"));
+        assert!(opts.is_enabled("blank-after-subckt"));
     }
 }

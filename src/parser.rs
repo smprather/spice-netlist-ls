@@ -48,9 +48,6 @@ pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File<'_> {
             }
             stmt => {
                 if let Some(top) = stack.last_mut() {
-                    if matches!(stmt, Stmt::Blank) && top.body.is_empty() {
-                        continue;
-                    }
                     top.body.push(stmt);
                 } else {
                     stmts.push(stmt);

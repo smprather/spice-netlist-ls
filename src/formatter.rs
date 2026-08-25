@@ -2,6 +2,12 @@ use crate::dialect::{Dialect, DialectKind};
 use crate::ir::{Directive, File, Instance, Param, Stmt, Subckt};
 use std::borrow::Cow;
 
+/// Format rule codes – ruff-inspired `select`/`ignore` names.
+/// Keep kebab-case like lint codes for a single `ignore` vocabulary.
+pub const RULE_BLANK_AFTER_SUBCKT: &str = "blank-after-subckt";
+pub const RULE_BLANK_BEFORE_ENDS: &str = "blank-before-ends";
+pub const RULE_BLANK_AFTER_ENDS: &str = "blank-after-ends";
+
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
     pub dialect: DialectKind,
@@ -12,6 +18,19 @@ pub struct FormatOptions {
     pub insert_final_newline: bool,
     /// Strip trailing whitespace from every emitted line.
     pub trim_trailing_whitespace: bool,
+    /// Disabled format rules (ruff `ignore`). Empty = all enabled.
+    pub ignore: Vec<String>,
+    /// Allowlist – if non-empty, only these rules are enabled (ruff `select`).
+    pub select: Vec<String>,
+}
+
+impl FormatOptions {
+    pub fn is_enabled(&self, rule: &str) -> bool {
+        if !self.select.is_empty() && !self.select.iter().any(|c| c.eq_ignore_ascii_case(rule)) {
+            return false;
+        }
+        !self.ignore.iter().any(|c| c.eq_ignore_ascii_case(rule))
+    }
 }
 
 impl Default for FormatOptions {
@@ -23,6 +42,8 @@ impl Default for FormatOptions {
             sort_params: false,
             insert_final_newline: true,
             trim_trailing_whitespace: true,
+            ignore: Vec::new(),
+            select: Vec::new(),
         }
     }
 }
@@ -161,13 +182,38 @@ fn format_stmt(
             *prev_was_comment = false;
         }
         Stmt::Subckt(s) => {
-            if !*first && !*prev_was_blank && !*prev_was_comment {
+            // Blank before subckt: when blank-after-subckt is enabled, nested
+            // subckts should not have a blank after the parent header. Only
+            // top-level subckts get a separating blank (readability).
+            let add_blank_before = if opts.is_enabled(RULE_BLANK_AFTER_SUBCKT) {
+                depth == 0 && !*first && !*prev_was_blank && !*prev_was_comment
+            } else {
+                !*first && !*prev_was_blank && !*prev_was_comment
+            };
+            if add_blank_before {
                 out.push('\n');
             }
             let start = out.len();
             format_subckt_header_into(s, dialect, out);
             emit_wrapped(out, start, s.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
-            for inner in &s.body {
+            // Apply blank-line rules to the subckt body.
+            // - blank-after-subckt: no empty line after .subckt header
+            // - blank-before-ends: no empty line before .ends
+            let body: Vec<&Stmt> = {
+                let mut v: Vec<&Stmt> = s.body.iter().collect();
+                if opts.is_enabled(RULE_BLANK_AFTER_SUBCKT) {
+                    while matches!(v.first(), Some(Stmt::Blank)) {
+                        v.remove(0);
+                    }
+                }
+                if opts.is_enabled(RULE_BLANK_BEFORE_ENDS) {
+                    while matches!(v.last(), Some(Stmt::Blank)) {
+                        v.pop();
+                    }
+                }
+                v
+            };
+            for inner in body {
                 format_stmt(
                     inner,
                     out,
@@ -195,7 +241,8 @@ fn format_stmt(
             }
             *prev_was_blank = false;
             *prev_was_comment = false;
-            if depth == 0 {
+            // blank-after-ends: at least one empty line after .ends (depth 0 only)
+            if opts.is_enabled(RULE_BLANK_AFTER_ENDS) && depth == 0 {
                 out.push('\n');
                 *prev_was_blank = true;
                 *first = false;
@@ -487,5 +534,74 @@ mod tests {
         assert!(output.contains("+ w = 2u"));
         // idempotent
         assert_eq!(fmt(&output), output);
+    }
+
+    #[test]
+    fn no_blank_after_subckt() {
+        let input = ".subckt a b\n\nR1 a b 1k\n.ends a\n";
+        assert_eq!(fmt(input), ".subckt a b\nR1 a b 1k\n.ends a\n\n");
+        // also nested
+        let nested = ".subckt outer a b\n\n.subckt inner c d\nR1 c d 1k\n.ends inner\n.ends outer\n";
+        assert_eq!(
+            fmt(nested),
+            ".subckt outer a b\n.subckt inner c d\nR1 c d 1k\n.ends inner\n.ends outer\n\n"
+        );
+    }
+
+    #[test]
+    fn no_blank_before_ends() {
+        let input = ".subckt a b\nR1 a b 1k\n\n.ends a\n";
+        assert_eq!(fmt(input), ".subckt a b\nR1 a b 1k\n.ends a\n\n");
+    }
+
+    #[test]
+    fn blank_after_ends() {
+        let input = ".subckt a b\nR1 a b 1k\n.ends a\nX1 a b a\n";
+        assert_eq!(fmt(input), ".subckt a b\nR1 a b 1k\n.ends a\n\nX1 a b a\n");
+        // multiple blanks collapse to one
+        let multi = ".subckt a b\nR1 a b 1k\n.ends a\n\n\nX1 a b a\n";
+        assert_eq!(fmt(multi), ".subckt a b\nR1 a b 1k\n.ends a\n\nX1 a b a\n");
+    }
+
+    #[test]
+    fn blank_rules_opt_out_via_ignore() {
+        let mut opts = FormatOptions::default();
+        opts.ignore.push(RULE_BLANK_AFTER_SUBCKT.to_string());
+        let input = ".subckt a b\n\nR1 a b 1k\n.ends a\n";
+        // with ignore, blank after subckt is preserved
+        assert_eq!(
+            format_str(input, &opts),
+            ".subckt a b\n\nR1 a b 1k\n.ends a\n\n"
+        );
+
+        let mut opts2 = FormatOptions::default();
+        opts2.ignore.push(RULE_BLANK_BEFORE_ENDS.to_string());
+        let input2 = ".subckt a b\nR1 a b 1k\n\n.ends a\n";
+        assert_eq!(
+            format_str(input2, &opts2),
+            ".subckt a b\nR1 a b 1k\n\n.ends a\n\n"
+        );
+
+        let mut opts3 = FormatOptions::default();
+        opts3.ignore.push(RULE_BLANK_AFTER_ENDS.to_string());
+        let input3 = ".subckt a b\nR1 a b 1k\n.ends a\nX1 a b a\n";
+        assert_eq!(
+            format_str(input3, &opts3),
+            ".subckt a b\nR1 a b 1k\n.ends a\nX1 a b a\n"
+        );
+    }
+
+    #[test]
+    fn blank_rules_select_allowlist() {
+        let mut opts = FormatOptions::default();
+        opts.select.push(RULE_BLANK_AFTER_SUBCKT.to_string());
+        // only blank-after-subckt enabled, others disabled
+        let input = ".subckt a b\nR1 a b 1k\n\n.ends a\nX1 a b a\n";
+        // blank before .ends should be preserved because that rule is not selected
+        // blank after .ends should also be preserved (no insertion)
+        // but current input has blank before .ends (violation) and missing blank after .ends
+        // with only after-subckt enabled, output should keep those
+        let out = format_str(input, &opts);
+        assert!(out.contains("R1 a b 1k\n\n.ends a\nX1"), "select allowlist failed: {}", out);
     }
 }

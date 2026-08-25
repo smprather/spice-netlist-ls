@@ -36,10 +36,27 @@ fn main() {
             return;
         }
         if args.lint {
-            let has_error = run_lint("<stdin>", &input, kind, None, args.format, args.error_on, args.max_warnings);
+            let has_error = run_lint(
+                "<stdin>",
+                &input,
+                kind,
+                None,
+                args.format,
+                args.error_on,
+                args.max_warnings,
+                &args.ignore,
+                &args.select,
+            );
             std::process::exit(if has_error { 1 } else { 0 });
         }
-        let opts = format_options_for(None, fixed, kind);
+        let mut opts = format_options_for(None, fixed, kind);
+        // CLI ruff-style overrides: --ignore/--select win over config file
+        if !args.ignore.is_empty() {
+            opts.ignore.extend(args.ignore.clone());
+        }
+        if !args.select.is_empty() {
+            opts.select = args.select.clone();
+        }
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -68,12 +85,28 @@ fn main() {
             continue;
         }
         if args.lint {
-            if run_lint(&path.display().to_string(), &input, kind, Some(path), args.format, args.error_on, args.max_warnings) {
+            if run_lint(
+                &path.display().to_string(),
+                &input,
+                kind,
+                Some(path),
+                args.format,
+                args.error_on,
+                args.max_warnings,
+                &args.ignore,
+                &args.select,
+            ) {
                 exit_code = 1;
             }
             continue;
         }
-        let opts = format_options_for(Some(path), fixed, kind);
+        let mut opts = format_options_for(Some(path), fixed, kind);
+        if !args.ignore.is_empty() {
+            opts.ignore.extend(args.ignore.clone());
+        }
+        if !args.select.is_empty() {
+            opts.select = args.select.clone();
+        }
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -102,6 +135,8 @@ fn run_lint(
     fmt: LintFormat,
     error_on: ErrorOn,
     max_warnings: Option<usize>,
+    cli_ignore: &[String],
+    cli_select: &[String],
 ) -> bool {
     use spice_netlist_ls::linter::{LintOptions, Severity};
     use std::collections::HashMap;
@@ -119,7 +154,15 @@ fn run_lint(
 
     // Project policy from [lint] in spicefmt.toml (CLI beats nothing here —
     // this *is* the project's voice; --error-on/--max-warnings are the CI's).
-    let policy = path.map(|p| spice_netlist_ls::config::lint_config_for(p)).unwrap_or_default();
+    let mut policy = path.map(|p| spice_netlist_ls::config::lint_config_for(p)).unwrap_or_default();
+    // Ruff-style CLI overrides: --ignore/--select extend config file
+    if !cli_ignore.is_empty() {
+        policy.ignore.extend(cli_ignore.iter().cloned());
+    }
+    if !cli_select.is_empty() {
+        // CLI --select replaces config select (allowlist)
+        policy.select = cli_select.to_vec();
+    }
     for d in &mut diags {
         if let Some(s) = policy.severity.get(d.code) {
             match s.as_str() {
@@ -129,7 +172,11 @@ fn run_lint(
             }
         }
     }
-    let active: Vec<_> = diags.iter().filter(|d| !policy.is_suppressed(d.code)).collect();
+    // Ruff: select allowlist + ignore
+    let active: Vec<_> = diags
+        .iter()
+        .filter(|d| policy.is_enabled(d.code))
+        .collect();
 
     match fmt {
         LintFormat::Human => {
@@ -170,7 +217,7 @@ fn run_lint(
                 .collect();
             rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(b.2)));
             for (n, sev, code) in &rows {
-                let mark = if policy.is_suppressed(code) { "  [suppressed]" } else { "" };
+                let mark = if !policy.is_enabled(code) { "  [suppressed]" } else { "" };
                 println!("{n:>9}  {sev:<7}  {code}{mark}");
             }
             let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();

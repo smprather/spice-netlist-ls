@@ -2,4 +2,4 @@
 source: tests/scs_segments.rs
 expression: "lint(\"no_lang.sp\")"
 ---
-
+6:1: warning [blank-after-ends]: at least one empty line required after .ends

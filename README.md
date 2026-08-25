@@ -247,7 +247,40 @@ overrides defaults; CLI flags beat the config file:
 dialect = "spectre"   # or omit/auto for per-file detection
 max_width = 100
 sort_params = true    # sort key=value params after positional args
+
+# Formatter is opinionated but ruff-inspired opt-out is available:
+[format]
+# Disable specific formatting rules (all enabled by default)
+# Available: blank-after-subckt, blank-before-ends, blank-after-ends
+ignore = ["blank-after-subckt"]   # keep your empty line after .subckt
+# select = ["blank-after-ends"]   # allowlist – only these run
+
+[lint]
+# Like ruff's `select`/`ignore` – control which diagnostics are reported.
+# `suppress` is kept for backwards compat (alias for `ignore`).
+# Available codes: undefined-subckt, arity-mismatch, floating-node,
+# dangling-rc-endpoint, duplicate-instance, unterminated-subckt,
+# stray-ends, ends-name-mismatch, node-case-collision, orphan-continuation,
+# plus the three blank-line codes above (reported by `spicefmt --lint`).
+ignore = ["blank-before-ends"]    # don't warn about blank before .ends
+# select = ["blank-after-ends"]   # only warn about that one
+# severity overrides: "code" = "error" | "warning"
+[lint.severity]
+# "blank-after-ends" = "error"
 ```
+
+CLI also supports ruff-style `--ignore`/`--select` (comma-separated or repeated):
+
+```bash
+spicefmt --ignore blank-after-subckt,blank-before-ends file.sp
+spicefmt --lint --ignore blank-after-ends --format summary
+```
+
+Formatter rules (all fixable via `spicefmt` or `spicefmt --write`):
+
+- `blank-after-subckt`  – no empty lines after `.subckt` (nesting-aware: no blank after outer header before inner `.subckt`)
+- `blank-before-ends`   – no empty lines before `.ends`
+- `blank-after-ends`    – at least one empty line after `.ends` (top-level only; collapsed to one, `* prev_was_blank` dedup)
 
 `.editorconfig` files are honored too ([editorconfig.org](https://editorconfig.org)):
 `max_line_length`, `insert_final_newline`, and `trim_trailing_whitespace` apply to
@@ -256,7 +289,7 @@ your netlist files via their usual glob sections. Precedence, loosest to tightes
 1. built-in defaults
 2. `.editorconfig` (walked up to `root = true`)
 3. `spicefmt.toml`
-4. CLI flags
+4. CLI flags (`--dialect`, `--ignore`, `--select`, etc.)
 
 The LSP applies the same search so your editor and CI agree.
 

@@ -92,4 +92,18 @@ pub struct Args {
 
     #[arg(long, help = "Print dialect list and exit")]
     pub list_dialects: bool,
+
+    /// Ruff-inspired: disable specific rules (comma-separated or repeated).
+    /// Available codes: blank-after-subckt, blank-before-ends, blank-after-ends,
+    /// plus lint codes (undefined-subckt, arity-mismatch, floating-node,
+    /// dangling-rc-endpoint, duplicate-instance, unterminated-subckt, stray-ends,
+    /// ends-name-mismatch, node-case-collision, orphan-continuation).
+    /// Example: --ignore blank-after-subckt,blank-before-ends
+    #[arg(long, value_delimiter = ',', help = "Ignore rules (comma-separated)")]
+    pub ignore: Vec<String>,
+
+    /// Ruff-inspired allowlist – only these rules are enabled (others disabled).
+    /// Example: --select blank-after-ends  (only that rule runs)
+    #[arg(long, value_delimiter = ',', help = "Select rules to enable (allowlist)")]
+    pub select: Vec<String>,
 }

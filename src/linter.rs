@@ -288,6 +288,11 @@ fn lint_str_single(
 ) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
+    // Format-derived blank-line rules (ruff-inspired, fixable via formatter).
+    // These are emitted here so `spicefmt --lint` reports the same violations
+    // the formatter would fix. Codes are the same as `[format] ignore` names.
+    lint_blank_rules(input, &mut diags);
+
     // name(lowercase) -> (port_count, def_line)
     let mut subckt_defs: FxHashMap<String, (usize, usize)> = FxHashMap::default();
     let mut open_subckts: Vec<(String, usize)> = Vec::new();
@@ -552,6 +557,70 @@ fn lint_str_single(
     diags
 }
 
+fn lint_blank_rules(input: &str, diags: &mut Vec<Diagnostic>) {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with(".subckt") {
+            // Check next line is blank -> violation blank-after-subckt
+            if i + 1 < lines.len() && lines[i + 1].trim().is_empty() {
+                diags.push(Diagnostic {
+                    range: line_range((i + 1) as u32, lines[i + 1].len() as u32),
+                    severity: Severity::Warning,
+                    code: "blank-after-subckt",
+                    message: "empty line after .subckt is not allowed".to_string(),
+                });
+            }
+            stack.push(i);
+        } else if lower.starts_with(".ends") {
+            // blank-before-ends: previous line is blank
+            if i > 0 && lines[i - 1].trim().is_empty() {
+                diags.push(Diagnostic {
+                    range: line_range((i - 1) as u32, lines[i - 1].len() as u32),
+                    severity: Severity::Warning,
+                    code: "blank-before-ends",
+                    message: "empty line before .ends is not allowed".to_string(),
+                });
+            }
+            // blank-after-ends: at least one blank after .ends for top-level
+            let depth = stack.len();
+            if depth == 1 {
+                let next_is_blank = i + 1 < lines.len() && lines[i + 1].trim().is_empty();
+                let next_is_eof = i + 1 >= lines.len();
+                if next_is_eof {
+                    // File ends immediately after .ends – need blank line before EOF
+                    // Input ending with "\n\n" or "\n\r\n" would have an extra empty line,
+                    // but lines() discards trailing empty, so check raw input.
+                    let ends_with_blank = input.ends_with("\n\n") || input.ends_with("\r\n\r\n") || input.ends_with("\n \n") ;
+                    if !ends_with_blank {
+                        diags.push(Diagnostic {
+                            range: line_range(i as u32, trimmed.len() as u32),
+                            severity: Severity::Warning,
+                            code: "blank-after-ends",
+                            message: "at least one empty line required after .ends".to_string(),
+                        });
+                    }
+                } else if !next_is_blank {
+                    diags.push(Diagnostic {
+                        range: line_range(i as u32, trimmed.len() as u32),
+                        severity: Severity::Warning,
+                        code: "blank-after-ends",
+                        message: "at least one empty line required after .ends".to_string(),
+                    });
+                }
+            }
+            if !stack.is_empty() {
+                stack.pop();
+            }
+        }
+    }
+}
+
 /// Node interner. Maps a lowercased node name to a dense id; all per-node
 /// state (mention count, first-mention line, first-written spelling,
 /// observed-by-measurement flag) lives in id-indexed vectors.
@@ -735,6 +804,7 @@ mod tests {
 Mn y a vss vss nch w=1u
 Mp y a vdd vdd pch w=2u
 .ends
+
 Xinv in out vdd gnd inv
 Cload out gnd 10f
 Vdd vdd gnd 1.2
@@ -745,10 +815,10 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
 
     #[test]
     fn flags_undefined_subckt() {
-        let input = ".subckt buf o i\n.ends\nX1 a b missing_block\n";
+        let input = ".subckt buf o i\n.ends\n\nX1 a b missing_block\n";
         let diags = lint(input);
         assert!(codes(&diags).contains(&"undefined-subckt"));
-        assert_eq!(diags[0].range.start_line, 2);
+        assert_eq!(diags.iter().find(|d| d.code == "undefined-subckt").unwrap().range.start_line, 3);
     }
 
     #[test]
@@ -784,10 +854,10 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
 
     #[test]
     fn flags_arity_mismatch() {
-        let input = ".subckt two a b\n.ends\nX1 only_one two\n";
+        let input = ".subckt two a b\n.ends\n\nX1 only_one two\n";
         let diags = lint(input);
         let arity = diags.iter().find(|d| d.code == "arity-mismatch").unwrap();
-        assert_eq!(arity.range.start_line, 2);
+        assert_eq!(arity.range.start_line, 3);
         assert_eq!(arity.severity, Severity::Warning);
     }
 
@@ -806,7 +876,7 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
 
     #[test]
     fn subckt_port_used_once_in_body_is_not_floating() {
-        let input = ".subckt inv a y\nMn y a 0 0 nch w=1u\n.ends\n";
+        let input = ".subckt inv a y\nMn y a 0 0 nch w=1u\n.ends\n\n";
         let diags = lint(input);
         assert_eq!(codes(&diags), Vec::<&'static str>::new());
     }
@@ -835,7 +905,7 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
 
     #[test]
     fn same_instance_name_in_different_subckts_is_ok() {
-        let input = ".subckt a p q\nR1 p q 1k\n.ends\n.subckt b p q\nR1 p q 2k\n.ends\n";
+        let input = ".subckt a p q\nR1 p q 1k\n.ends\n\n.subckt b p q\nR1 p q 2k\n.ends\n\n";
         assert!(!codes(&lint(input)).contains(&"duplicate-instance"));
     }
 
@@ -996,7 +1066,7 @@ R2 c d 2k
         // Fast path: no `simulator lang=` → single-section, no header. The
         // diagnostic set must match what lint_str_single would produce
         // directly (this is the no-regression guard for the linter).
-        let input = ".subckt buf o i\n.ends\nX1 p q buf\n";
+        let input = ".subckt buf o i\n.ends\n\nX1 p q buf\n";
         let via_lint_str = lint_str(input, &hspice(), &LintOptions::default());
         let empty = crate::fx::FxHashMap::default();
         let via_single = lint_str_single(input, &hspice(), &LintOptions::default(), &empty);
@@ -1005,5 +1075,34 @@ R2 c d 2k
             codes(&via_single),
             "fast path must match single-section lint exactly"
         );
+    }
+
+    #[test]
+    fn blank_after_subckt_is_flagged() {
+        let input = ".subckt a b\n\nR1 a b 1k\n.ends a\n\n";
+        assert!(codes(&lint(input)).contains(&"blank-after-subckt"));
+        let clean = ".subckt a b\nR1 a b 1k\n.ends a\n\n";
+        assert!(!codes(&lint(clean)).contains(&"blank-after-subckt"));
+    }
+
+    #[test]
+    fn blank_before_ends_is_flagged() {
+        let input = ".subckt a b\nR1 a b 1k\n\n.ends a\n\n";
+        assert!(codes(&lint(input)).contains(&"blank-before-ends"));
+        let clean = ".subckt a b\nR1 a b 1k\n.ends a\n\n";
+        assert!(!codes(&lint(clean)).contains(&"blank-before-ends"));
+    }
+
+    #[test]
+    fn blank_after_ends_is_flagged() {
+        let input = ".subckt a b\nR1 a b 1k\n.ends a\nX1 a b a\n";
+        assert!(codes(&lint(input)).contains(&"blank-after-ends"));
+        let clean = ".subckt a b\nR1 a b 1k\n.ends a\n\nX1 a b a\n";
+        assert!(!codes(&lint(clean)).contains(&"blank-after-ends"));
+        // at EOF, missing blank is also flagged
+        let eof_no_blank = ".subckt a b\nR1 a b 1k\n.ends a\n";
+        assert!(codes(&lint(eof_no_blank)).contains(&"blank-after-ends"));
+        let eof_blank = ".subckt a b\nR1 a b 1k\n.ends a\n\n";
+        assert!(!codes(&lint(eof_blank)).contains(&"blank-after-ends"));
     }
 }
