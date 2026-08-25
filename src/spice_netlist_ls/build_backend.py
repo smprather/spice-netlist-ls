@@ -15,13 +15,18 @@ from pathlib import Path
 
 import uv_build
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BIN_DIR = ROOT / "src" / "spice_netlist_ls" / "bin"
 RUST_BINS = ("spicefmt", "spice-netlist-ls")
 
 
 def bundle_rust_binaries() -> None:
+    # When building wheel from sdist (uv build's second stage), Cargo.toml
+    # is not present in the sdist — binaries are already bundled in
+    # src/spice_netlist_ls/bin/ at sdist creation time. Skip rebuild there
+    # so `uv build` and air-gapped installs work.
     if not (ROOT / "Cargo.toml").is_file():
+        # sdist build: ensure bundled bins exist, otherwise skip silently
         return
     subprocess.run(
         ["cargo", "build", "--release"],

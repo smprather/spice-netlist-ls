@@ -1,13 +1,178 @@
 # spice-netlist-ls — a formatter and language server for SPICE netlists
 
-`gofmt` for SPICE: an opinionated formatter, linter, and LSP server for the classic
+An opinionated formatter, linter, and LSP server for the classic for the
 SPICE circuit-simulation netlist format — with pluggable support for the dialects
 that grew out of it (HSPICE, NGSPICE, Spectre-SPICE, LTspice).
 
-> **Not that SPICE.** This tool formats *netlists* for the SPICE circuit simulator
-> created at UC Berkeley in 1972. It has nothing to do with the SPICE programming
-> language announced in 2021 (`spice-lang`, `.spc` files) — different language,
-> different ecosystem.
+> This tool formats *netlists* for the SPICE circuit simulator
+> created at UC Berkeley in 1972. Note the Spice programming
+> language announced in 2021 (`spice-lang`, `.spc` files).
+
+## Neovim setup — copy-paste, works for everyone (no plugins required)
+
+> **One binary, zero plugins.** `spice-netlist-ls` provides formatting, diagnostics, go-to-definition, and semantic highlights (nets!) — no `:TSInstall`, no tree-sitter grammar.
+
+**Requires:** Neovim ≥0.11 for zero-config (≥0.10 with `nvim-lspconfig`, `<0.10` gets offline regex highlights only). `spice-netlist-ls` on `$PATH`.
+
+### 1. Install the binary
+
+```bash
+cargo install --path .                          # from source
+# or grab a static tarball from Releases and put spice-netlist-ls + spicefmt on $PATH
+# https://github.com/smprather/spice-netlist-ls/releases
+cargo install --path . --locked                 # reproducible build
+```
+
+Verify: `spice-netlist-ls --help` and `spicefmt --help` print.
+
+### 2. Tell Neovim which files are SPICE (required)
+
+`after/ftplugin/spice.lua` only fires *after* `filetype=spice` is set — without this step `ft` stays `conf`/`""` and the server never attaches.
+
+**Easiest (works on every Neovim, no lua):**
+
+```bash
+mkdir -p ~/.config/nvim/ftdetect
+cp contrib/vim/ftdetect/spice.vim ~/.config/nvim/ftdetect/spice.vim  # covers *.sp,*.cir,*.ckt,*.net,*.scs,*.subckt,*.sub — see contrib/vim/ftdetect/spice.vim:8
+```
+
+**Alternative — lua in `init.lua`:**
+
+```lua
+vim.filetype.add({
+  extension = {
+    sp = "spice", cir = "spice", ckt = "spice", net = "spice",
+    scs = "spice", subckt = "spice", sub = "spice",
+    spice = "spice", cdl = "spice", pex = "spice",
+  },
+})
+```
+
+Either one is enough. Verify: `:e foo.sp` then `:set ft?` → `spice` (not `conf`).
+
+### 3. Connect the language server — pick ONE
+
+Air-gapped / tarball not on `$PATH`? `export SPICEFMT_LS_CMD=/path/to/spice-netlist-ls` — all configs below respect it.
+
+#### Option A — Zero-config, no plugin manager (recommended for everyone, Neovim ≥0.11)
+
+```bash
+mkdir -p ~/.config/nvim/after/ftplugin
+cp after/ftplugin/spice.lua ~/.config/nvim/after/ftplugin/spice.lua
+# restart nvim, open any SPICE file
+```
+
+What you copied (`after/ftplugin/spice.lua:1`): registers `cmd = { "spice-netlist-ls" }`, `filetypes = { "spice" }`, `root_markers = { ".git", "spicefmt.toml" }`, enables the server for this buffer, sets `commentstring`, adds **format-on-save** (`BufWritePre → vim.lsp.buf.format`), and links per-filetype semantic highlights (`@lsp.type.variable.spice → Identifier` for nets — the fix for “nets show no color”).
+
+Remove the `BufWritePre` block in that file if you prefer manual `:lua vim.lsp.buf.format()`.
+
+#### Option B — Native `lsp/` directory (structured configs, Neovim ≥0.11, no lspconfig)
+
+For configs that keep servers in `~/.config/nvim/lsp/` and enable them in `init.lua` (like this repo’s `lua/user/init.lua:22`):
+
+```bash
+mkdir -p ~/.config/nvim/lsp
+cp contrib/lspconfig-spicefmt.lua ~/.config/nvim/lsp/spicefmt.lua
+# or cp to spice_netlist_ls.lua if you prefer that name — just enable the same name
+```
+
+```lua
+-- in init.lua
+vim.lsp.enable("spicefmt")  -- or "spice_netlist_ls" if you copied to that name
+```
+
+`contrib/lspconfig-spicefmt.lua:1` is already a `vim.lsp.Config` ( `---@type vim.lsp.Config` ) — no wrapper needed for native `lsp/` . `after/ftplugin/spice.lua` still supplies the highlight links + format-on-save even in this mode; keep it (Option A) *or* add the highlight snippet from Troubleshooting below to `init.lua`.
+
+#### Option C — nvim-lspconfig (Neovim ≥0.10)
+
+If you already use `neovim/nvim-lspconfig`:
+
+```lua
+-- init.lua with lspconfig
+require("lspconfig").spicefmt.setup({
+  cmd = { "spice-netlist-ls" },
+  filetypes = { "spice" },
+  root_markers = { ".git", "spicefmt.toml" },
+})
+-- or via lazy.nvim
+{ "neovim/nvim-lspconfig", opts = { servers = { spicefmt = {} } } }
+```
+
+`contrib/lspconfig-spicefmt.lua:1` is the upstream-ready config for this path. With lspconfig, copy `ftdetect` (step 2) and add the highlight snippet from Troubleshooting below — `after/ftplugin/spice.lua`’s autocmd won’t run unless you also copy it.
+
+### 4. What you get
+
+* **Format on save** — via `textDocument/formatting` (included in `after/ftplugin`; remove autocmd for manual).
+* **Diagnostics** — undefined subckt, arity, floating nodes, orphan `+` continuations, `.ends` name mismatch, etc. (same as `spicefmt --lint`).
+* **Go-to-definition** — `gd` on an `X` line jumps to its `.subckt` (follows `.include`/`.lib` transitively).
+* **Semantic highlighting** — nets (`variable`), subckt names (`type`), instance names (`function`), param keys (`property`) etc via `semanticTokensProvider` (`src/semantic_tokens.rs:40`). Dialect-aware (Spectre `(a b)` parens `src/dialect.rs:82`, `+` continuations `src/parser.rs:84`). No tree-sitter grammar needed. See [Syntax highlighting](#syntax-highlighting) for offline regex fallback.
+
+### 5. Verify — prove nets are colored
+
+Open the test file and check:
+
+```bash
+nvim testdata/simple_rc_chain.subckt
+```
+
+```vim
+:set ft?                     " spice  — if not, step 2 failed
+:LspInfo                     " spicefmt (or spice_netlist_ls) attached
+:checkhealth vim.lsp
+:hi @lsp.type.variable.spice " links to Identifier (not 'cleared' — if cleared, re-copy after/ftplugin/spice.lua:32)
+:Inspect                     " on `in` in `R1 in mid {rser}` → @lsp.type.variable.spice
+:lua vim.lsp.buf.format()    " should format
+gd                           " on `X1 in n1 rcstage` → jumps to `.subckt rcstage`
+```
+
+If `LspInfo` empty: `:echo exepath("spice-netlist-ls")` should print a path — if empty, binary not on `$PATH` or set `$SPICEFMT_LS_CMD`. If `ft` is wrong, see step 2. If highlight is `cleared`, see Troubleshooting.
+
+### 6. Troubleshooting
+
+**Nets (or other tokens) show no color?** Neovim uses per-filetype groups (`@lsp.type.variable.spice`), not the generic `@lsp.type.variable` most colorschemes define. `after/ftplugin/spice.lua:32` already links them for Option A/B-native. If you used lspconfig (Option C) or a colorscheme that clears them, add to `init.lua` (sourced *after* your colorscheme):
+
+```lua
+local links = {
+  ["@lsp.type.variable"] = "Identifier", -- nets / ports — the "net names" group
+  ["@lsp.type.type"]     = "Type",
+  ["@lsp.type.function"] = "Function",
+  ["@lsp.type.keyword"]  = "Keyword",
+  ["@lsp.type.property"] = "Identifier",
+  ["@lsp.type.string"]   = "String",
+  ["@lsp.type.number"]   = "Number",
+  ["@lsp.type.comment"]  = "Comment",
+  ["@lsp.type.operator"] = "Operator",
+}
+for base, target in pairs(links) do
+  for _, ft in ipairs({ "spice", "cir", "scs", "subckt", "sp", "ckt", "net" }) do
+    vim.api.nvim_set_hl(0, base .. "." .. ft, { link = target, default = true })
+  end
+  vim.api.nvim_set_hl(0, base, { link = target, default = true })
+end
+vim.api.nvim_create_autocmd("ColorScheme", {
+  callback = function()
+    for base, target in pairs(links) do
+      for _, ft in ipairs({ "spice", "cir", "scs", "subckt", "sp", "ckt", "net" }) do
+        vim.api.nvim_set_hl(0, base .. "." .. ft, { link = target, default = true })
+      end
+    end
+  end,
+})
+```
+
+Then `:hi @lsp.type.variable.spice` should `links to Identifier` and `:Inspect` on a net shows that group. Re-copying `after/ftplugin/spice.lua` does the same for Option A.
+
+**Filetype mismatch** (`.sp` → `conf`): `*.sp` is claimed by `conf` in stock Neovim. Our `ftdetect` (step 2) overrides it — without it, `after/ftplugin` never fires. Check `:set ft?` and see [Filetype detection](#filetype-detection) above.
+
+**Old Neovim (<0.10):** semantic tokens unsupported — nets fall back to regex `contrib/vim/syntax/spice.vim:1` (ports → `Identifier` but no precise net/param split — that needs the LSP).
+
+**No formatting:** remove the `BufWritePre` to debug, then `:lua vim.lsp.buf.format()` manually; check `spicefmt` on CLI: `echo "* title\nR1 a b 1k" | spicefmt --dialect hspice`.
+
+### 7. Mason (optional)
+
+`contrib/mason-package.yaml:1` is a draft registry entry. Until upstreamed, install the binary manually (step 1) — Mason will pick it up from `$PATH`. Air-gapped sites can mirror the GitHub Release tarballs and point `mason` `registries` at their mirror.
+
+---
 
 ## Why
 
@@ -71,6 +236,7 @@ echo ".PARAM w=1u" | ./target/release/spicefmt --dialect hspice
 - Inline comments stay comments: a comment bumped past `max_width` moves to its own `+ <delim> text` continuation line instead of being split mid-comment into what would become code.
 - `key = value` spacing follows the dialect: HSPICE-style spacing by default, Spectre-SPICE emits `key=value`.
 - `.ends <name>` that names a different subckt than the one it closes is kept as written and flagged as `ends-name-mismatch`.
+- Blank line before a top-level `.subckt` is preserved but **not forced** when the previous line is a comment — `* comment` directly before `.subckt` stays `* comment\n.subckt` (no extra blank), while `param → subckt` keeps the separating blank for readability (`src/formatter.rs:159`).
 
 ## Configuration
 
@@ -119,6 +285,15 @@ Add a dialect: implement `Dialect`, register in `dialect_from_str`, no parser re
 - [x] Lint ergonomics: `--format human|json|sarif|summary`, `--error-on warning|error`, `--max-warnings N`; `[lint]` table in `spicefmt.toml` for per-code `suppress` (hidden from detail, still counted in summary) and severity overrides; JSONL output is **one object per line** with a `schema_version` field on every record
 - [x] PyPI wrapper package exposing `spicefmt` (`uv tool install .`; entry points exec the Rust binaries, bundled at build time or resolved from `$SPICEFMT_BIN`/PATH)
 
+## Syntax highlighting
+
+Nets (`variable`), subckt names (`type`), instance names (`function`), param keys (`property`) etc are colored via **LSP semanticTokens** — no tree-sitter grammar required. `spice-netlist-ls` advertises `semanticTokensProvider` (`src/semantic_tokens.rs:40`, `src/bin/ls.rs:10`); Neovim ≥0.10, Helix ≥23.10, VS Code, Zed render them automatically when the server is attached. For net names this is dialect- and arity-accurate (uses the same `element_node_count` `src/parser.rs:655` the linter does, including Spectre `(a b)` parens `src/dialect.rs:82` and `+` continuations `src/parser.rs:84`). Independent-source functions (`pulse(0 1.2 …)`, `pwl(…)`, `sin(…)`) are split: the function name → `type`, `(` / `)` → `operator`, inner numbers → `number` (`src/semantic_tokens.rs:358` — fixes `pulse(0` where `0` was previously the same color as `(`).
+
+- **Neovim**: `after/ftplugin/spice.lua` registers the server; semantic tokens are enabled automatically. No `:TSInstall` needed. Optional regex fallback for offline viewing: `contrib/vim/syntax/spice.vim` + `ftdetect/spice.vim`.
+- **Helix**: add `contrib/helix/languages.toml` to `~/.config/helix/languages.toml`; nets are highlighted via the LSP. Copy `queries/spice/highlights.scm` to `runtime/queries/spice/highlights.scm` only if you also install a `tree-sitter-spice` parser for offline highlighting.
+- **Vim8 / bare vim**: copy `contrib/vim/ftdetect/spice.vim`, `contrib/vim/syntax/spice.vim`, `contrib/vim/ftplugin/spice.vim` into `~/.vim/` (regex fallback highlights directives/params/numbers/strings/comments; precise net coloring needs the LSP).
+- **Do we need tree-sitter?** No for accurate colors — LSP already does. Tree-sitter is only for offline highlighting without the server (heavier to maintain, needs a separate C grammar kept in sync with the Rust parser). Hybrid is shipped: LSP primary, regex/queries fallback.
+
 ## Install
 
 Releases ship static binaries for Linux (musl), macOS, and Windows via
@@ -135,3 +310,5 @@ cargo test                                        # unit + CLI integration + ins
 INSTA_UPDATE=always cargo test --test snapshots   # accept snapshot updates
 ls testdata/                                      # dialect fixtures; snapshot-tested
 ```
+
+`testdata/simple_rc_chain.subckt:3` is `* RC lowpass` (comment title) — the bare form `RC lowpass` would look like `R` device `RC` with single node `lowpass` and no value, which is not a valid resistor and is intentionally flagged as `dangling-rc-endpoint` (`src/linter.rs:862` testcase `bare_title_like_rc_lowpass_is_flagged_as_invalid_resistor`). Keep the `*` in the file; use the bare form to test the linter's detection of a malformed `R` card.

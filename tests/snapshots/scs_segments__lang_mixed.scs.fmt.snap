@@ -4,7 +4,6 @@ expression: "format(\"lang_mixed.scs\")"
 ---
 simulator lang=spice
 * spice section — `;` is a SPICE inline comment, `key = value` spacing
-
 .subckt inv a y vdd vss
 Mn y a vss vss nch w = 1u
 Mp y a vdd vdd pch w = 2u

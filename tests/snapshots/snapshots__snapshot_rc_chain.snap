@@ -4,7 +4,7 @@ expression: "format_str(&input, &FormatOptions { dialect: kind, ..Default::defau
 ---
 * RC chain driven by a pulse source — exercises .param braces,
 * continuation, subckt def/call, and the title-line convention.
-RC lowpass
+* RC lowpass
 .param rser = 1k cload = '1.2*1p'
 
 .subckt rcstage in out

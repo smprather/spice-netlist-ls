@@ -4,7 +4,6 @@ expression: "format(\"no_lang.sp\")"
 ---
 * plain SPICE deck — no `simulator lang=` directive.
 * Unchanged-behavior guard: must format byte-identically to today.
-
 .subckt inv a y vdd vss
 Mn y a vss vss nch w=1u
 Mp y a vdd vdd pch w=2u

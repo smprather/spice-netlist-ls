@@ -1,5 +1,7 @@
 # Plan: per-section dialect switching for `.scs` files (`simulator lang=…`)
 
+> **Status: Implemented and shipped** — `src/segments.rs`, `src/formatter.rs:30`, `src/linter.rs:233`, `src/bin/ls.rs:246` all route per-section; `tests/scs_segments.rs` + `testdata/scs/` fixtures are frozen. This doc is retained as design record.
+
 ## Goal
 
 A `.scs` (Spectre netlist) file is a sequence of *language segments*. A

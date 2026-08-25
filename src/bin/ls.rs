@@ -5,12 +5,48 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 fn main() -> anyhow::Result<()> {
+    // Early --help / --version handling: LSP servers are normally optionless,
+    // but a human running `spice-netlist-ls --help` should not get
+    // "Error: disconnected channel". Check before touching stdio.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "{} — SPICE language server (formatting + diagnostics + semanticTokens + go-to-definition)\n\
+            \n\
+            Usage: spice-netlist-ls\n\
+            \n\
+            Run with no arguments; communicates via LSP stdio. Editors launch it as:\n\
+            \n  \
+              vim.lsp.config[\"spicefmt\"] = {{ cmd = {{ \"spice-netlist-ls\" }}, filetypes = {{ \"spice\", \"cir\", \"scs\", \"subckt\" }} }}\n\
+            \n\
+            Options:\n  \
+              -h, --help     Show this help and exit\n  \
+              -V, --version  Print version and exit\n\
+            \n\
+            Environment:\n  \
+              SPICE_NETLIST_LS_LOG=1            Enable startup log to stderr (nvim shows stderr as ERROR, so off by default)\n  \
+              SPICE_NETLIST_LS_LOG_FILE=<path>  Append verbose trace to file\n  \
+              SPICEFMT_LS_CMD=<path>            Override binary path (used by after/ftplugin/spice.lua)\n\
+            \n\
+            See: https://github.com/smprather/spice-netlist-ls",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("spice-netlist-ls {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // Unknown flags are ignored for LSP client compatibility — clients never pass them,
+    // and strict rejection would break `cmd = { \"spice-netlist-ls\", \"--stdio\" }` style configs.
+
     let (connection, io_threads) = Connection::stdio();
 
     let server_caps = serde_json::to_value(ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(spice_netlist_ls::semantic_tokens::server_capabilities()),
         ..Default::default()
     })
     .unwrap();
@@ -22,6 +58,15 @@ fn main() -> anyhow::Result<()> {
     if std::env::var_os("SPICE_NETLIST_LS_LOG").is_some() {
         eprintln!("spice-netlist-ls: started (dialect auto-detect, formatter + definition)");
     }
+    // Optional verbose trace file for debugging without spamming stderr.
+    // Set SPICE_NETLIST_LS_LOG_FILE=/tmp/spice-ls.log to append request traces.
+    let log_file = std::env::var_os("SPICE_NETLIST_LS_LOG_FILE").map(PathBuf::from);
+    if let Some(ref p) = log_file {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            use std::io::Write as _;
+            let _ = writeln!(f, "spice-netlist-ls {} started pid={}", env!("CARGO_PKG_VERSION"), std::process::id());
+        }
+    }
 
     // Text of open buffers, keyed by URI. LSP didOpen/didChange keep this
     // in sync; formatting/definition respond against the in-memory text,
@@ -29,6 +74,12 @@ fn main() -> anyhow::Result<()> {
     let mut docs: HashMap<Uri, String> = HashMap::new();
 
     for msg in &connection.receiver {
+        if let Some(ref p) = log_file {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                use std::io::Write as _;
+                let _ = writeln!(f, "msg: {:?}", msg);
+            }
+        }
         match msg {
             Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
@@ -123,6 +174,46 @@ fn handle_request(
     docs: &HashMap<Uri, String>,
 ) -> anyhow::Result<()> {
     match req.method.as_str() {
+        "textDocument/semanticTokens/full" => {
+            let (id, params): (RequestId, SemanticTokensParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let text = text_for(&params.text_document.uri, docs);
+            let fallback = spice_netlist_ls::detect_dialect(&text);
+            let tokens = spice_netlist_ls::semantic_tokens::semantic_tokens_full(&text, fallback);
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(tokens)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/semanticTokens/range" => {
+            let (id, params): (RequestId, SemanticTokensRangeParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let text = text_for(&params.text_document.uri, docs);
+            let fallback = spice_netlist_ls::detect_dialect(&text);
+            // For simplicity return full tokens; client will clip to range. Range-aware clipping is optional.
+            let tokens = spice_netlist_ls::semantic_tokens::semantic_tokens_full(&text, fallback);
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(tokens)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/semanticTokens/full/delta" => {
+            let (id, params): (RequestId, SemanticTokensDeltaParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let text = text_for(&params.text_document.uri, docs);
+            let fallback = spice_netlist_ls::detect_dialect(&text);
+            let tokens = spice_netlist_ls::semantic_tokens::semantic_tokens_full(&text, fallback);
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(tokens)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
         "textDocument/formatting" => {
             let (id, params): (RequestId, DocumentFormattingParams) =
                 (req.id, serde_json::from_value(req.params)?);

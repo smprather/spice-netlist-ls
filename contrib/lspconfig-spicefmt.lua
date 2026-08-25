@@ -5,9 +5,10 @@
 
 ---@type vim.lsp.Config
 return {
-  cmd = { "spice-netlist-ls" },
-  filetypes = { "spice", "cir", "scs", "subckt" },
+  cmd = { vim.env.SPICEFMT_LS_CMD or "spice-netlist-ls" },
+  filetypes = { "spice" },
   root_markers = { ".git", "spicefmt.toml" },
+  single_file_support = true,
   docs = {
     description = [[
 https://github.com/smprather/spice-netlist-ls

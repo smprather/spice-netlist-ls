@@ -39,7 +39,7 @@ fn main() {
             let has_error = run_lint("<stdin>", &input, kind, None, args.format, args.error_on, args.max_warnings);
             std::process::exit(if has_error { 1 } else { 0 });
         }
-        let mut opts = format_options_for(None, fixed, kind);
+        let opts = format_options_for(None, fixed, kind);
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -73,7 +73,7 @@ fn main() {
             }
             continue;
         }
-        let mut opts = format_options_for(Some(path), fixed, kind);
+        let opts = format_options_for(Some(path), fixed, kind);
         let output = spice_netlist_ls::format_str(&input, &opts);
         if args.check {
             if input != output {
@@ -164,7 +164,7 @@ fn run_lint(
             for d in &diags {
                 *counts.entry((d.severity.as_str(), d.code)).or_default() += 1;
             }
-            let mut rows: Vec<((usize, &str, &str))> = counts
+            let mut rows: Vec<(usize, &str, &str)> = counts
                 .into_iter()
                 .map(|((sev, code), n)| (n, sev, code))
                 .collect();

@@ -7,7 +7,6 @@ simulator lang=spice
 * Correctness anchor: this case already "works" today because the whole
 * file is parsed as spectre, but the `;` inline comment below must be
 * preserved as a comment (it would be mis-tokenized under spectre).
-
 .subckt inv a y vdd vss
 Mn y a vss vss nch w=1u
 Mp y a vdd vdd pch w=2u

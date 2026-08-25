@@ -175,15 +175,6 @@ pub(crate) fn parse_editorconfig(text: &str, rel_path: &str) -> (EditorConfig, b
     (cfg, is_root)
 }
 
-fn declares_root(text: &str) -> bool {
-    text.lines().any(|raw| {
-        let line = raw.trim();
-        line.split_once('=').is_some_and(|(k, v)| {
-            k.trim().eq_ignore_ascii_case("root") && parse_bool(v) == Some(true)
-        })
-    })
-}
-
 /// Apply every `.editorconfig` between `start`'s directory and either a
 /// `root = true` marker or the filesystem root. Closer files override
 /// farther ones, so files are applied farthest-first.

@@ -1,0 +1,26 @@
+# contrib/helix/languages.toml — spice-netlist-ls + optional tree-sitter
+# Add to your helix config:  cat contrib/helix/languages.toml >> ~/.config/helix/languages.toml
+# or  include via `[[language]]` merging (helix ≥23.10 merges arrays).
+#
+# With this, helix highlights nets via LSP semanticTokens (no parser build)
+# and falls back to tree-sitter queries/spice/highlights.scm when offline.
+
+[[language]]
+name = "spice"
+scope = "source.spice"
+injection-regex = "spice"
+file-types = ["sp", "cir", "ckt", "net", "spice", "scs", "subckt", "sub", "lib"]
+comment-token = "*"
+language-servers = ["spice-netlist-ls"]
+indent = { tab-width = 8, unit = "  " }
+roots = ["spicefmt.toml", ".git"]
+
+[language-server.spice-netlist-ls]
+command = "spice-netlist-ls"
+# args = []  # no args needed; dialect auto-detected
+# environment variable SPICEFMT_LS_CMD overrides binary location in air-gapped installs
+
+# Optional: if you build a tree-sitter-spice parser, point helix at it
+# [[grammar]]
+# name = "spice"
+# source = { git = "https://github.com/your-fork/tree-sitter-spice", rev = "main" }

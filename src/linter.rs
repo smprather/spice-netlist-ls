@@ -857,6 +857,28 @@ Vin in gnd pulse(0 1.2 0 100p 100p 1n 2n)
     }
 
     #[test]
+    fn bare_title_like_rc_lowpass_is_flagged_as_invalid_resistor() {
+        // "RC lowpass" looks like R device "RC" with single node "lowpass" and no
+        // value — not a valid resistor. It must be flagged, not treated as title.
+        // The correct title form is "* RC lowpass" (comment). This is the
+        // incorrect-format testcase for simple_rc_chain's title line.
+        let input = "RC lowpass\nR1 a b 1k\n";
+        let diags = lint(input);
+        assert!(
+            codes(&diags).contains(&"dangling-rc-endpoint"),
+            "bare 'RC lowpass' should be flagged as dangling-rc-endpoint, got {:?}",
+            codes(&diags)
+        );
+        // Correct form (comment) must NOT be flagged — use a closed loop so no dangling
+        let input_ok = "* RC lowpass\nR1 a b 1k\nR2 b c 1k\nR3 c a 1k\n";
+        assert!(
+            !codes(&lint(input_ok)).contains(&"dangling-rc-endpoint"),
+            "comment title '* RC lowpass' should not be flagged, got {:?}",
+            codes(&lint(input_ok))
+        );
+    }
+
+    #[test]
     fn attached_continuation_is_not_orphan() {
         let input = "M1 a b c d nch\n+ w=1u ad=0.5p\n";
         assert!(!codes(&lint(input)).contains(&"orphan-continuation"));

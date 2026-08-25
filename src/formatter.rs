@@ -76,8 +76,18 @@ fn format_into(file: &File, out: &mut String, opts: &FormatOptions, dialect: &dy
 fn emit_statements(file: &File, out: &mut String, opts: &FormatOptions, dialect: &dyn Dialect) {
     let mut first = true;
     let mut prev_was_blank = false;
+    let mut prev_was_comment = false;
     for stmt in &file.stmts {
-        format_stmt(stmt, out, opts, dialect, 0, &mut first, &mut prev_was_blank);
+        format_stmt(
+            stmt,
+            out,
+            opts,
+            dialect,
+            0,
+            &mut first,
+            &mut prev_was_blank,
+            &mut prev_was_comment,
+        );
     }
 }
 
@@ -122,6 +132,7 @@ fn format_stmt(
     depth: usize,
     first: &mut bool,
     prev_was_blank: &mut bool,
+    prev_was_comment: &mut bool,
 ) {
     match stmt {
         Stmt::Blank => {
@@ -130,30 +141,43 @@ fn format_stmt(
             }
             out.push('\n');
             *prev_was_blank = true;
+            *prev_was_comment = false;
         }
         Stmt::Comment(c) => {
             let line = normalize_comment(c);
             push_line(out, &line, opts, dialect, depth, first, prev_was_blank);
+            *prev_was_comment = true;
         }
         Stmt::Directive(d) => {
             let start = out.len();
             format_directive_into(d, dialect, out);
             emit_wrapped(out, start, d.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
+            *prev_was_comment = false;
         }
         Stmt::Instance(inst) => {
             let start = out.len();
             format_instance_into(inst, dialect, out);
             emit_wrapped(out, start, inst.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
+            *prev_was_comment = false;
         }
         Stmt::Subckt(s) => {
-            if !*first && !*prev_was_blank {
+            if !*first && !*prev_was_blank && !*prev_was_comment {
                 out.push('\n');
             }
             let start = out.len();
             format_subckt_header_into(s, dialect, out);
             emit_wrapped(out, start, s.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             for inner in &s.body {
-                format_stmt(inner, out, opts, dialect, depth + 1, first, prev_was_blank);
+                format_stmt(
+                    inner,
+                    out,
+                    opts,
+                    dialect,
+                    depth + 1,
+                    first,
+                    prev_was_blank,
+                    prev_was_comment,
+                );
             }
             let ends_start = out.len();
             out.push_str(".ends");
@@ -170,6 +194,7 @@ fn format_stmt(
                 *prev_was_blank = false;
             }
             *prev_was_blank = false;
+            *prev_was_comment = false;
             if depth == 0 {
                 out.push('\n');
                 *prev_was_blank = true;
