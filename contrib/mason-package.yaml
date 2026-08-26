@@ -13,7 +13,7 @@ languages: []
 categories: [LSP, Formatter, Linter]
 
 source:
-  id: pkg:github/smprather/spice-netlist-ls@v0.1.0
+  id: pkg:github/smprather/spice-netlist-ls@v2026.8.0
   build:
     - target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
       files:

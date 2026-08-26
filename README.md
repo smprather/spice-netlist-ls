@@ -1,6 +1,6 @@
 # spice-netlist-ls — a formatter and language server for SPICE netlists
 
-> **Current status (2026-08-26):** `v0.5.1` on `main`. Formatter is 14-rule opinionated (`src/formatter.rs:7` `ALL_FORMAT_RULES`) with ruff `ignore`/`select` (`spicefmt.toml` `[format]` + `--ignore`/`--select`). Releases always include `## What's Changed` (`.github/workflows/release.yml:139`). `fmt: off/on/skip` pragmas (statement-level, subckt-safe) and `ends-name` (always add `s.name` after `.ends`) are implemented.
+> **Current status (2026-08-26):** `v2026.8.0` on `main` (calver: `year.month.patch`). Formatter is 14-rule opinionated (`src/formatter.rs:7` `ALL_FORMAT_RULES`) with ruff `ignore`/`select` (`spicefmt.toml` `[format]` + `--ignore`/`--select`). Releases always include `## What's Changed` (`.github/workflows/release.yml:139`). `fmt: off/on/skip` pragmas (statement-level, subckt-safe) and `ends-name` (always add `s.name` after `.ends`) are implemented.
 
 An opinionated formatter, linter, and LSP server for the classic for the
 SPICE circuit-simulation netlist format — with pluggable support for the dialects
