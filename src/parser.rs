@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File<'_> {
-    parse_str_spanned(input, dialect).0
+    parse_str_impl(input, dialect, false).0
 }
 
 /// Like `parse_str`, but also returns the physical 0-based line span
@@ -17,13 +17,23 @@ pub fn parse_str_spanned<'a>(
     input: &'a str,
     dialect: Arc<dyn Dialect>,
 ) -> (File<'a>, Vec<(usize, usize)>) {
+    parse_str_impl(input, dialect, true)
+}
+
+fn parse_str_impl<'a>(
+    input: &'a str,
+    dialect: Arc<dyn Dialect>,
+    record_spans: bool,
+) -> (File<'a>, Vec<(usize, usize)>) {
     let logical = logical_line_spans(input, dialect.as_ref());
     let mut stmts: Vec<Stmt> = Vec::with_capacity(logical.len());
-    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(logical.len());
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut stack: Vec<Subckt> = Vec::new();
 
     for (start, end, line) in &logical {
-        spans.push((*start, *end));
+        if record_spans {
+            spans.push((*start, *end));
+        }
         // Statements borrow their token text from the input. A logical line
         // assembled from continuations is owned by the span table, so a
         // statement parsed from one must be deep-copied to outlive it —
@@ -76,9 +86,11 @@ pub fn parse_str_spanned<'a>(
         } else {
             stmts.push(Stmt::Subckt(sub));
         }
-        // A subckt closed by EOF has no `.ends` line: push a sentinel span
-        // so every emitted node still occupies exactly one span slot.
-        spans.push((usize::MAX, usize::MAX));
+        if record_spans {
+            // A subckt closed by EOF has no `.ends` line: push a sentinel
+            // span so every emitted node still occupies exactly one span slot.
+            spans.push((usize::MAX, usize::MAX));
+        }
     }
 
     (File::new(stmts), spans)

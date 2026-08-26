@@ -40,29 +40,45 @@ pub const ALL_FORMAT_RULES: &[&str] = &[
 /// `fmt: off` / `fmt: on` / `fmt: skip` handling – ruff-style `fmt: off` regions.
 /// Recognized in any comment style (`*`, `$`, `;`, `//`) and also `spicefmt: off`.
 /// Case-insensitive, `:` optional, whitespace flexible: `* fmt: off`, `*fmt:off`, `* FMT OFF`, etc.
-fn contains_fmt_directive(line: &str, directive: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    // Normalize: find "fmt" then check for directive after optional ":"
-    // Accept "fmt: off", "fmt:off", "fmt off", "spicefmt: off", etc.
-    let targets = [
-        format!("fmt: {}", directive),
-        format!("fmt:{}", directive),
-        format!("fmt {}", directive),
-        format!("spicefmt: {}", directive),
-        format!("spicefmt:{}", directive),
-        format!("spicefmt {}", directive),
-    ];
-    targets.iter().any(|t| lower.contains(t))
+///
+/// Scans for `fmt` (or `spicefmt`) followed by optional `: `/whitespace and an
+/// `off`/`on`/`skip` word, without allocating.
+fn fmt_directive_kind(line: &str) -> Option<&'static str> {
+    let b = line.as_bytes();
+    let kinds: [(&[u8], &str); 3] = [(b"off", "off"), (b"on", "on"), (b"skip", "skip")];
+    let mut i = 0;
+    while i + 3 <= b.len() {
+        if b[i].eq_ignore_ascii_case(&b'f')
+            && b[i + 1].eq_ignore_ascii_case(&b'm')
+            && b[i + 2].eq_ignore_ascii_case(&b't')
+        {
+            let mut j = i + 3;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t' || b[j] == b':') {
+                j += 1;
+            }
+            let rest = &b[j..];
+            for (pat, name) in &kinds {
+                if rest.len() >= pat.len()
+                    && rest[..pat.len()].eq_ignore_ascii_case(pat)
+                    && (rest.len() == pat.len() || !rest[pat.len()].is_ascii_alphanumeric())
+                {
+                    return Some(name);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn is_fmt_off(line: &str) -> bool {
-    contains_fmt_directive(line, "off")
+    fmt_directive_kind(line) == Some("off")
 }
 fn is_fmt_on(line: &str) -> bool {
-    contains_fmt_directive(line, "on")
+    fmt_directive_kind(line) == Some("on")
 }
 fn is_fmt_skip(line: &str) -> bool {
-    contains_fmt_directive(line, "skip")
+    fmt_directive_kind(line) == Some("skip")
 }
 
 #[derive(Clone, Debug)]
@@ -107,14 +123,12 @@ impl Default for FormatOptions {
 
 pub fn format_str(input: &str, opts: &FormatOptions) -> String {
     // fmt: off/on/skip handling – ruff-style region suppression.
-    // If no fmt directive at all, fast path to inner to avoid overhead.
-    let lower_input = input.to_ascii_lowercase();
-    if lower_input.contains("fmt:") || lower_input.contains("fmt ") || lower_input.contains("spicefmt:") {
-        // Check if any fmt directive actually present
-        let has_fmt = input.lines().any(|l| is_fmt_off(l) || is_fmt_on(l) || is_fmt_skip(l));
-        if has_fmt {
-            return format_str_with_fmt(input, opts);
-        }
+    // memchr quick reject: no 'f'/'F' byte means no directive can exist, so
+    // plain decks pay nothing for the feature.
+    if (input.contains('f') || input.contains('F'))
+        && input.lines().any(|l| fmt_directive_kind(l).is_some())
+    {
+        return format_str_with_fmt(input, opts);
     }
     format_str_inner(input, opts)
 }
