@@ -1,6 +1,6 @@
 # Plan: per-section dialect switching for `.scs` files (`simulator lang=…`)
 
-> **Status: Implemented and shipped** — `src/segments.rs`, `src/formatter.rs:30`, `src/linter.rs:233`, `src/bin/ls.rs:246` all route per-section; `tests/scs_segments.rs` + `testdata/scs/` fixtures are frozen. This doc is retained as design record.
+> **Status (2026-08-26): Implemented and shipped in `v0.3.0` (`7aacd59`) – `src/segments.rs`, `src/formatter.rs:30`, `src/linter.rs:233`, `src/bin/ls.rs:246` all route per-section; `tests/scs_segments.rs` + `testdata/scs/` fixtures are frozen. Current `main` is `v0.5.1` with 14 formatter rules (`src/formatter.rs:7`) and statement-level `fmt: off/on/skip` pragmas. This doc retained as design record.
 
 ## Goal
 

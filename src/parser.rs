@@ -5,11 +5,25 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File<'_> {
+    parse_str_spanned(input, dialect).0
+}
+
+/// Like `parse_str`, but also returns the physical 0-based line span
+/// (`start..=end`) of every statement, in emission order: a `.subckt`
+/// contributes its header span, then its body statements' spans, then the
+/// `.ends` line's span. Continuation lines fold into their parent's span.
+/// Used by the formatter's `fmt: off/on/skip` rewrite pass.
+pub fn parse_str_spanned<'a>(
+    input: &'a str,
+    dialect: Arc<dyn Dialect>,
+) -> (File<'a>, Vec<(usize, usize)>) {
     let logical = logical_line_spans(input, dialect.as_ref());
     let mut stmts: Vec<Stmt> = Vec::with_capacity(logical.len());
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(logical.len());
     let mut stack: Vec<Subckt> = Vec::new();
 
-    for (_, _, line) in &logical {
+    for (start, end, line) in &logical {
+        spans.push((*start, *end));
         // Statements borrow their token text from the input. A logical line
         // assembled from continuations is owned by the span table, so a
         // statement parsed from one must be deep-copied to outlive it —
@@ -62,9 +76,12 @@ pub fn parse_str(input: &str, dialect: Arc<dyn Dialect>) -> File<'_> {
         } else {
             stmts.push(Stmt::Subckt(sub));
         }
+        // A subckt closed by EOF has no `.ends` line: push a sentinel span
+        // so every emitted node still occupies exactly one span slot.
+        spans.push((usize::MAX, usize::MAX));
     }
 
-    File::new(stmts)
+    (File::new(stmts), spans)
 }
 
 /// Logical lines as `(start_line, end_line_inclusive, text)` spans, 0-based
@@ -347,6 +364,7 @@ fn parse_subckt<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> Stmt
             body: Vec::new(),
             inline_comment,
             ends_name: None,
+            ends_raw: None,
         });
     }
     let name = tokens.remove(0);
@@ -371,6 +389,7 @@ fn parse_subckt<'a>(line: &'a str, inline_comment: Option<Cow<'a, str>>) -> Stmt
         body: Vec::new(),
         inline_comment,
         ends_name: None,
+        ends_raw: None,
     })
 }
 

@@ -72,6 +72,7 @@ impl LintConfig {
 /// - `comment-normalize`            – `*foo` → `* foo`
 /// - `trim-trailing-whitespace`     – strip trailing spaces
 /// - `insert-final-newline`         – ensure file ends with `\n`
+/// - `ends-name`                    – always emit `s.name` after `.ends`
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FormatConfig {

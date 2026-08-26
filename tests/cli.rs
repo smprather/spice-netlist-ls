@@ -95,12 +95,21 @@ fn trailing_dangling_eq_does_not_drop_the_key() {
 // ---------- regression: .ends name mismatch ----------
 
 #[test]
-fn ends_name_mismatch_preserves_closing_name() {
+fn ends_name_default_rewrites_mismatch() {
     let (out, _, _) = run(&[], Some(".subckt inv a\n.ends wrong\nX1 p inv\n"));
-    assert_eq!(out, ".subckt inv a\n.ends wrong\n\nX1 p inv\n");
+    assert_eq!(out, ".subckt inv a\n.ends inv\n\nX1 p inv\n");
     // idempotent
     let (out2, _, _) = run(&[], Some(&out));
     assert_eq!(out, out2);
+}
+
+#[test]
+fn ends_name_ignore_preserves_closing_name() {
+    let (out, _, _) = run(
+        &["--ignore", "ends-name"],
+        Some(".subckt inv a\n.ends wrong\nX1 p inv\n"),
+    );
+    assert_eq!(out, ".subckt inv a\n.ends wrong\n\nX1 p inv\n");
 }
 
 #[test]

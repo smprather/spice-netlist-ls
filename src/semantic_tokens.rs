@@ -215,6 +215,7 @@ fn highlight_line(raw: &str, line: u32, dialect: &dyn crate::dialect::Dialect, o
 
     match stmt {
         crate::ir::Stmt::Blank => {}
+        crate::ir::Stmt::Verbatim(_) => {}
         crate::ir::Stmt::Comment(_) => {
             // Should have been caught, but fallback
             let col = (raw.len() - raw.trim_start().len()) as u32;

@@ -15,6 +15,9 @@ pub enum Stmt<'a> {
     Directive(Directive<'a>),
     Instance(Instance<'a>),
     Subckt(Subckt<'a>),
+    /// Source text to emit verbatim (fmt: off/on/skip regions). Produced
+    /// only by the formatter's fmt-directive rewrite pass.
+    Verbatim(Cow<'a, str>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +54,10 @@ pub struct Subckt<'a> {
     /// from `name`. When `Some`, the formatter emits `.ends <ends_name>` so
     /// a mismatch is preserved across round-trips (the linter warns).
     pub ends_name: Option<Cow<'a, str>>,
+    /// Original `.ends ...` line text, emitted verbatim when the line falls
+    /// inside a `fmt: off`/`fmt: skip` region. Set only by the formatter's
+    /// fmt-directive rewrite pass.
+    pub ends_raw: Option<Cow<'a, str>>,
 }
 
 impl<'a> File<'a> {
@@ -73,6 +80,7 @@ impl Stmt<'_> {
             Stmt::Directive(d) => Stmt::Directive(d.into_owned()),
             Stmt::Instance(i) => Stmt::Instance(i.into_owned()),
             Stmt::Subckt(s) => Stmt::Subckt(s.into_owned()),
+            Stmt::Verbatim(c) => Stmt::Verbatim(owned(c)),
         }
     }
 }
@@ -115,6 +123,7 @@ impl Subckt<'_> {
             body: self.body.into_iter().map(Stmt::into_owned).collect(),
             inline_comment: self.inline_comment.map(owned),
             ends_name: self.ends_name.map(owned),
+            ends_raw: self.ends_raw.map(owned),
         }
     }
 }

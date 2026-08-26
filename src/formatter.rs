@@ -17,6 +17,7 @@ pub const RULE_SORT_PARAMS: &str = "sort-params";
 pub const RULE_COMMENT_NORMALIZE: &str = "comment-normalize";
 pub const RULE_TRIM_TRAILING: &str = "trim-trailing-whitespace";
 pub const RULE_FINAL_NEWLINE: &str = "insert-final-newline";
+pub const RULE_ENDS_NAME: &str = "ends-name";
 
 /// All known format rules – used for validation and docs.
 pub const ALL_FORMAT_RULES: &[&str] = &[
@@ -33,7 +34,36 @@ pub const ALL_FORMAT_RULES: &[&str] = &[
     RULE_COMMENT_NORMALIZE,
     RULE_TRIM_TRAILING,
     RULE_FINAL_NEWLINE,
+    RULE_ENDS_NAME,
 ];
+
+/// `fmt: off` / `fmt: on` / `fmt: skip` handling – ruff-style `fmt: off` regions.
+/// Recognized in any comment style (`*`, `$`, `;`, `//`) and also `spicefmt: off`.
+/// Case-insensitive, `:` optional, whitespace flexible: `* fmt: off`, `*fmt:off`, `* FMT OFF`, etc.
+fn contains_fmt_directive(line: &str, directive: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    // Normalize: find "fmt" then check for directive after optional ":"
+    // Accept "fmt: off", "fmt:off", "fmt off", "spicefmt: off", etc.
+    let targets = [
+        format!("fmt: {}", directive),
+        format!("fmt:{}", directive),
+        format!("fmt {}", directive),
+        format!("spicefmt: {}", directive),
+        format!("spicefmt:{}", directive),
+        format!("spicefmt {}", directive),
+    ];
+    targets.iter().any(|t| lower.contains(t))
+}
+
+fn is_fmt_off(line: &str) -> bool {
+    contains_fmt_directive(line, "off")
+}
+fn is_fmt_on(line: &str) -> bool {
+    contains_fmt_directive(line, "on")
+}
+fn is_fmt_skip(line: &str) -> bool {
+    contains_fmt_directive(line, "skip")
+}
 
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
@@ -76,6 +106,20 @@ impl Default for FormatOptions {
 }
 
 pub fn format_str(input: &str, opts: &FormatOptions) -> String {
+    // fmt: off/on/skip handling – ruff-style region suppression.
+    // If no fmt directive at all, fast path to inner to avoid overhead.
+    let lower_input = input.to_ascii_lowercase();
+    if lower_input.contains("fmt:") || lower_input.contains("fmt ") || lower_input.contains("spicefmt:") {
+        // Check if any fmt directive actually present
+        let has_fmt = input.lines().any(|l| is_fmt_off(l) || is_fmt_on(l) || is_fmt_skip(l));
+        if has_fmt {
+            return format_str_with_fmt(input, opts);
+        }
+    }
+    format_str_inner(input, opts)
+}
+
+fn format_str_inner(input: &str, opts: &FormatOptions) -> String {
     let secs = crate::segments::segments(input, opts.dialect);
 
     // Fast path: no `simulator lang=` directive anywhere → today's code path,
@@ -105,6 +149,227 @@ pub fn format_str(input: &str, opts: &FormatOptions) -> String {
     }
     apply_trailer(&mut out, opts);
     out
+}
+
+/// Statement-level `fmt: off/on/skip` handling. Parses with per-statement
+/// source spans and rewrites disabled/skipped statements into `Verbatim`
+/// nodes carrying their exact original text, then formats the result
+/// through the normal emitter — so directives inside `.subckt` bodies work,
+/// unlike a line-level split (which would flush an open subckt as an empty
+/// one). The state carries across `simulator lang=` sections.
+struct FmtState {
+    enabled: bool,
+    skip_next: bool,
+}
+
+impl Default for FmtState {
+    fn default() -> Self {
+        Self { enabled: true, skip_next: false }
+    }
+}
+
+fn format_str_with_fmt(input: &str, opts: &FormatOptions) -> String {
+    let secs = crate::segments::segments(input, opts.dialect);
+    let mut out = String::with_capacity(input.len() + input.len() / 8);
+    let mut state = FmtState::default();
+    let mut saw_verbatim = false;
+    for sec in &secs {
+        if let Some(h) = sec.header {
+            out.push_str(h);
+            out.push('\n');
+        }
+        let sub_opts = FormatOptions { dialect: sec.dialect, ..opts.clone() };
+        let dialect = crate::dialect::get_dialect(sec.dialect);
+        let (file, spans) = crate::parser::parse_str_spanned(sec.body, dialect.clone());
+        let file = rewrite_for_fmt(file, &spans, sec.body, &mut state, &mut saw_verbatim);
+        emit_statements(&file, &mut out, &sub_opts, dialect.as_ref());
+    }
+    // Verbatim regions are byte-faithful: skip the trailing-whitespace trim
+    // when any were emitted; only the final-newline rule still applies.
+    if saw_verbatim {
+        apply_final_newline(&mut out, opts);
+    } else {
+        apply_trailer(&mut out, opts);
+    }
+    out
+}
+
+fn rewrite_for_fmt<'a>(
+    file: File<'a>,
+    spans: &[(usize, usize)],
+    input: &str,
+    state: &mut FmtState,
+    saw_verbatim: &mut bool,
+) -> File<'a> {
+    let lines: Vec<&str> = input.split('\n').collect();
+    let mut idx = 0;
+    let stmts = rewrite_stmts(file.stmts, spans, &mut idx, &lines, state, saw_verbatim);
+    File { stmts }
+}
+
+fn rewrite_stmts<'a>(
+    stmts: Vec<Stmt<'a>>,
+    spans: &[(usize, usize)],
+    idx: &mut usize,
+    lines: &[&str],
+    state: &mut FmtState,
+    saw_verbatim: &mut bool,
+) -> Vec<Stmt<'a>> {
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let (start, end) = spans[*idx];
+        *idx += 1;
+        let mut verbatim = |start: usize, end: Option<usize>| -> Stmt<'a> {
+            *saw_verbatim = true;
+            let text = match end {
+                Some(e) => lines[start..=e].join("\n"),
+                None => {
+                    let slice = &lines[start..];
+                    let slice = if slice.last() == Some(&"") {
+                        &slice[..slice.len() - 1]
+                    } else {
+                        slice
+                    };
+                    slice.join("\n")
+                }
+            };
+            Stmt::Verbatim(Cow::Owned(text))
+        };
+
+        // fmt directives act on any standalone comment-style line, whatever
+        // the dialect thinks it is (e.g. `; fmt: off` under HSPICE), and on
+        // bare directive lines (`spicefmt: off` with no comment marker).
+        let first = lines.get(start).copied().unwrap_or("");
+        match parse_fmt_directive(first) {
+            Some("off") => {
+                state.enabled = false;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+            Some("on") => {
+                state.enabled = true;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+            Some("skip") => {
+                state.skip_next = true;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+            _ => {}
+        }
+        if is_standalone_comment_line(first) {
+            if is_fmt_off(first) {
+                state.enabled = false;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+            if is_fmt_on(first) {
+                state.enabled = true;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+            if is_fmt_skip(first) {
+                state.skip_next = true;
+                out.push(verbatim(start, Some(end)));
+                continue;
+            }
+        }
+
+        if let Stmt::Subckt(mut sub) = stmt {
+            // Whole block verbatim when the header is disabled/skipped, or
+            // the header carries an inline `fmt: skip`.
+            let inline_skip = sub.inline_comment.as_deref().is_some_and(is_fmt_skip);
+            if state.skip_next || inline_skip || !state.enabled {
+                state.skip_next = false;
+                *idx += count_spans(&sub.body);
+                let (_, ends_end) = spans[*idx];
+                *idx += 1;
+                // EOF-closed subckts carry a sentinel span: verbatim to EOF.
+                let end = (ends_end != usize::MAX).then_some(ends_end);
+                out.push(verbatim(start, end));
+                continue;
+            }
+            // Enabled header: rewrite the body, then decide the `.ends` line.
+            let body = rewrite_stmts(sub.body, spans, idx, lines, state, saw_verbatim);
+            let (es, ee) = spans[*idx];
+            *idx += 1;
+            sub.body = body;
+            if !state.enabled && es != usize::MAX {
+                sub.ends_raw = Some(Cow::Owned(lines[es..=ee].join("\n")));
+                *saw_verbatim = true;
+            }
+            out.push(Stmt::Subckt(sub));
+            continue;
+        }
+
+        if state.skip_next {
+            if matches!(stmt, Stmt::Blank) {
+                // Blank lines don't consume a pending skip.
+                out.push(Stmt::Blank);
+                continue;
+            }
+            state.skip_next = false;
+            out.push(verbatim(start, Some(end)));
+            continue;
+        }
+
+        let is_blank = matches!(stmt, Stmt::Blank);
+        // Inline `$ fmt: skip` disables only the statement it's attached to.
+        let inline_skip = stmt_inline_comment(&stmt).is_some_and(is_fmt_skip);
+        if !state.enabled || inline_skip {
+            if is_blank {
+                out.push(Stmt::Blank);
+            } else {
+                out.push(verbatim(start, Some(end)));
+            }
+            continue;
+        }
+        out.push(stmt);
+    }
+    out
+}
+
+/// Number of span slots a statement list occupies in `parse_str_spanned`
+/// order: one per statement, plus one for each subckt's `.ends` line.
+fn count_spans(stmts: &[Stmt<'_>]) -> usize {
+    stmts.iter()
+        .map(|s| match s {
+            Stmt::Subckt(sub) => 1 + count_spans(&sub.body) + 1,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn stmt_inline_comment<'a>(stmt: &'a Stmt<'a>) -> Option<&'a str> {
+    match stmt {
+        Stmt::Directive(d) => d.inline_comment.as_deref(),
+        Stmt::Instance(i) => i.inline_comment.as_deref(),
+        Stmt::Subckt(s) => s.inline_comment.as_deref(),
+        _ => None,
+    }
+}
+
+fn is_standalone_comment_line(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('*') || t.starts_with("//") || t.starts_with(';') || t.starts_with('$')
+}
+
+/// Recognize a bare `fmt: off` / `spicefmt: on` line — no comment marker.
+/// Returns `off`/`on`/`skip` when the whole trimmed line is the directive.
+fn parse_fmt_directive(line: &str) -> Option<&'static str> {
+    let lower = line.trim().to_ascii_lowercase();
+    let body = lower
+        .strip_prefix("spicefmt")
+        .or_else(|| lower.strip_prefix("fmt"))?;
+    let body = body.trim_start();
+    let body = body.strip_prefix(':').unwrap_or(body).trim();
+    match body {
+        "off" => Some("off"),
+        "on" => Some("on"),
+        "skip" => Some("skip"),
+        _ => None,
+    }
 }
 
 pub fn format_file(file: &File, opts: &FormatOptions, dialect: &dyn Dialect) -> String {
@@ -143,8 +408,14 @@ fn emit_statements(file: &File, out: &mut String, opts: &FormatOptions, dialect:
 /// whole output. Running this per section would insert/drop a newline at each
 /// segment boundary; the sectioned formatter calls it only at the end.
 fn apply_trailer(out: &mut String, opts: &FormatOptions) {
-    // The emitter only produces trailing whitespace via exotic input tokens,
-    // so probe first; the rebuild is a full copy and skips in the common case.
+    apply_trim(out, opts);
+    apply_final_newline(out, opts);
+}
+
+/// Strip trailing whitespace from every line. The emitter only produces
+/// trailing whitespace via exotic input tokens, so probe first; the rebuild
+/// is a full copy and skips in the common case.
+fn apply_trim(out: &mut String, opts: &FormatOptions) {
     if opts.trim_trailing_whitespace
         && opts.is_enabled(RULE_TRIM_TRAILING)
         && has_trailing_whitespace(out)
@@ -160,7 +431,9 @@ fn apply_trailer(out: &mut String, opts: &FormatOptions) {
         out.clear();
         out.push_str(&trimmed);
     }
+}
 
+fn apply_final_newline(out: &mut String, opts: &FormatOptions) {
     if opts.is_enabled(RULE_FINAL_NEWLINE) {
         if opts.insert_final_newline {
             if !out.ends_with('\n') && !out.is_empty() {
@@ -222,6 +495,15 @@ fn format_stmt(
             emit_wrapped(out, start, inst.inline_comment.as_deref(), opts, dialect, first, prev_was_blank);
             *prev_was_comment = false;
         }
+        Stmt::Verbatim(text) => {
+            // fmt: off/on/skip regions: source text preserved byte-for-byte
+            // (except the global final-newline rule). Bypasses blank rules.
+            out.push_str(text);
+            out.push('\n');
+            *first = false;
+            *prev_was_blank = false;
+            *prev_was_comment = false;
+        }
         Stmt::Subckt(s) => {
             // Blank before subckt: top-level uses blank-before-subckt, nested
             // uses blank-after-subckt (blank after parent header = blank before
@@ -273,13 +555,23 @@ fn format_stmt(
                 );
             }
             let ends_start = out.len();
-            out.push_str(".ends");
-            if let Some(e) = &s.ends_name {
-                out.push(' ');
-                out.push_str(e);
-            } else if !s.name.is_empty() {
-                out.push(' ');
-                out.push_str(&s.name);
+            if let Some(raw) = &s.ends_raw {
+                // `.ends` line inside a fmt: off/skip region – verbatim.
+                out.push_str(raw);
+            } else {
+                out.push_str(".ends");
+                if opts.is_enabled(RULE_ENDS_NAME) {
+                    if !s.name.is_empty() {
+                        out.push(' ');
+                        out.push_str(&s.name);
+                    }
+                } else if let Some(e) = &s.ends_name {
+                    out.push(' ');
+                    out.push_str(e);
+                } else if !s.name.is_empty() {
+                    out.push(' ');
+                    out.push_str(&s.name);
+                }
             }
             if out.len() > ends_start {
                 out.push('\n');
@@ -769,5 +1061,90 @@ mod tests {
         opts.ignore.push(RULE_LINE_WRAP.to_string());
         let unwrapped = format_str(&long, &opts);
         assert!(!unwrapped.contains("\n+"), "line-wrap disabled should not add continuation");
+    }
+
+    // ---------- fmt: off/on/skip ----------
+
+    #[test]
+    fn fmt_off_region_is_verbatim() {
+        // The `.SUBCKT` header is inside the off region, so the whole block
+        // (including its inner `fmt: on`) stays verbatim.
+        let input = "* fmt: off\n.SUBCKT badly_formatted    a   b\nR1    a   b    1k\n* fmt: on\n.subckt good a b\nR1 a b 1k\n.ends good\n";
+        assert_eq!(fmt(input), input);
+        // idempotent: the directives re-apply on the second pass
+        assert_eq!(fmt(&fmt(input)), fmt(input));
+    }
+
+    #[test]
+    fn fmt_off_inside_subckt_body() {
+        let input = ".subckt bad a b\n* fmt: off\nR1    a   b   1k\n* fmt: on\n.ends bad\nX1 p bad\n";
+        let expected = ".subckt bad a b\n* fmt: off\nR1    a   b   1k\n* fmt: on\n.ends bad\n\nX1 p bad\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected);
+    }
+
+    #[test]
+    fn fmt_skip_inside_subckt_body() {
+        // regression: the skipped statement must stay inside the subckt
+        let input = ".subckt bad a b\n* fmt: skip\nR1    a   b   1k\n.ends bad\nX1 p bad\n";
+        let expected = ".subckt bad a b\n* fmt: skip\nR1    a   b   1k\n.ends bad\n\nX1 p bad\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected);
+    }
+
+    #[test]
+    fn fmt_skip_before_subckt_skips_whole_block() {
+        let input = "* fmt: skip\n.SUBCKT bad    a   b\nR1    a   b   1k\n.ENDS bad\nR2 c d 2k\n";
+        let out = fmt(input);
+        assert!(out.contains(".SUBCKT bad    a   b\nR1    a   b   1k\n.ENDS bad\n"), "block not verbatim: {out}");
+        assert!(out.contains("R2 c d 2k\n"), "following stmt not formatted: {out}");
+        assert_eq!(fmt(&out), out);
+    }
+
+    #[test]
+    fn fmt_skip_inline_disables_one_statement() {
+        let input = "R1 a b 1k $ fmt: skip\nR2   c   d   2k\n* fmt: skip\nR3 e f 3k\n";
+        let expected = "R1 a b 1k $ fmt: skip\nR2 c d 2k\n* fmt: skip\nR3 e f 3k\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected);
+    }
+
+    #[test]
+    fn fmt_off_covering_ends_line() {
+        let input = ".subckt a b\nR1 a b 1k\n* fmt: off\n.ends a\n* fmt: on\n";
+        let expected = ".subckt a b\nR1 a b 1k\n* fmt: off\n.ends a\n\n* fmt: on\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected);
+    }
+
+    #[test]
+    fn fmt_directive_syntax_variants() {
+        // case-insensitive, `:` optional, `spicefmt:` prefix
+        assert_eq!(
+            fmt("*FMT OFF\nR1   a   b   1k\n*fmt:on\nR2 c d 2k\n"),
+            "*FMT OFF\nR1   a   b   1k\n*fmt:on\nR2 c d 2k\n"
+        );
+        assert_eq!(
+            fmt("spicefmt: off\nR1   a   b   1k\nspicefmt: on\nR2 c d 2k\n"),
+            "spicefmt: off\nR1   a   b   1k\nspicefmt: on\nR2 c d 2k\n"
+        );
+        // non-comment-style directives under the outer dialect
+        assert_eq!(
+            fmt("; fmt: off\nR1   a   b   1k\n; fmt: on\nR2 c d 2k\n"),
+            "; fmt: off\nR1   a   b   1k\n; fmt: on\nR2 c d 2k\n"
+        );
+    }
+
+    #[test]
+    fn fmt_off_to_eof_keeps_rest_verbatim() {
+        let input = "* fmt: off\nR1   a   b   1k\n";
+        assert_eq!(fmt(input), "* fmt: off\nR1   a   b   1k\n");
+    }
+
+    #[test]
+    fn fmt_off_preserves_trailing_whitespace() {
+        let input = "R1 a b 1k   \n* fmt: off\nR2 c d 2k   \n* fmt: on\n";
+        let expected = "R1 a b 1k\n* fmt: off\nR2 c d 2k   \n* fmt: on\n";
+        assert_eq!(fmt(input), expected);
     }
 }

@@ -1,5 +1,7 @@
 # spice-netlist-ls — a formatter and language server for SPICE netlists
 
+> **Current status (2026-08-26):** `v0.5.1` on `main`. Formatter is 14-rule opinionated (`src/formatter.rs:7` `ALL_FORMAT_RULES`) with ruff `ignore`/`select` (`spicefmt.toml` `[format]` + `--ignore`/`--select`). Releases always include `## What's Changed` (`.github/workflows/release.yml:139`). `fmt: off/on/skip` pragmas (statement-level, subckt-safe) and `ends-name` (always add `s.name` after `.ends`) are implemented.
+
 An opinionated formatter, linter, and LSP server for the classic for the
 SPICE circuit-simulation netlist format — with pluggable support for the dialects
 that grew out of it (HSPICE, NGSPICE, Spectre-SPICE, LTspice).
@@ -254,7 +256,8 @@ sort_params = true    # sort key=value params after positional args
 # Available: lowercase-directive, eq-spacing, continuation-join,
 #   line-wrap, sort-params, blank-before-subckt, blank-after-subckt,
 #   blank-before-ends, blank-after-ends, blank-collapse,
-#   comment-normalize, trim-trailing-whitespace, insert-final-newline
+#   comment-normalize, trim-trailing-whitespace, insert-final-newline,
+#   ends-name
 ignore = ["blank-after-subckt"]   # keep your empty line after .subckt
 # select = ["blank-after-ends"]   # allowlist – only these run
 
@@ -297,6 +300,31 @@ Formatter rules (all fixable via `spicefmt` or `spicefmt --write`):
 - `comment-normalize`            – `*foo` → `* foo` (`src/formatter.rs:531`)
 - `trim-trailing-whitespace`     – strip trailing spaces (`src/formatter.rs:145`)
 - `insert-final-newline`         – ensure `\n` at EOF (`src/formatter.rs:161`)
+- `ends-name`                    – always add `s.name` after `.ends` (`src/formatter.rs:493`)
+
+### `fmt: off/on/skip` (ruff-style pragmas)
+
+Any comment line switches verbatim regions: `* fmt: off` … `* fmt: on`, or
+`// fmt: off`, `$ fmt: off`, `; fmt: off`, or a bare `fmt: off` / `spicefmt: off`
+line — case-insensitive, the `:` is optional (`*fmt:off`, `* FMT OFF`). Lines
+between `off` and `on` (and the pragma lines themselves) are emitted exactly
+as written; no rule touches them, not even trailing-whitespace trimming.
+
+`fmt: skip` keeps the next statement verbatim (`* fmt: skip` on its own line —
+skips the next non-blank statement, including a whole `.subckt` block), or,
+written inline (`R1 a b 1k $ fmt: skip`), keeps just that statement. Pragmas
+work anywhere, including inside `.subckt` bodies, and are idempotent: running
+`spicefmt` again leaves the verbatim regions untouched.
+
+```spice
+* fmt: off
+R1 a b 1k     tc=2     $ hand-tuned layout, do not touch
+* fmt: on
+.subckt inv a b
+* fmt: skip
+R1    a   b   1k
+.ends inv
+```
 
 `.editorconfig` files are honored too ([editorconfig.org](https://editorconfig.org)):
 `max_line_length`, `insert_final_newline`, and `trim_trailing_whitespace` apply to

@@ -97,7 +97,7 @@ pub struct Args {
     /// Format rules: lowercase-directive, eq-spacing, continuation-join,
     /// line-wrap, sort-params, blank-before-subckt, blank-after-subckt,
     /// blank-before-ends, blank-after-ends, blank-collapse, comment-normalize,
-    /// trim-trailing-whitespace, insert-final-newline.
+    /// trim-trailing-whitespace, insert-final-newline, ends-name.
     /// Lint codes: undefined-subckt, arity-mismatch, floating-node,
     /// dangling-rc-endpoint, duplicate-instance, unterminated-subckt, stray-ends,
     /// ends-name-mismatch, node-case-collision, orphan-continuation,
