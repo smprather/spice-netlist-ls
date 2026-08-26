@@ -46,6 +46,12 @@ fn main() -> anyhow::Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: None,
+            },
+        })),
         semantic_tokens_provider: Some(spice_netlist_ls::semantic_tokens::server_capabilities()),
         ..Default::default()
     })
@@ -273,6 +279,66 @@ fn handle_request(
             let resp = Response {
                 id,
                 result: Some(serde_json::to_value(location)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/rename" => {
+            let (id, params): (RequestId, RenameParams) = (req.id, serde_json::from_value(req.params)?);
+            let uri = params.text_document_position.text_document.uri;
+            let text = text_for(&uri, docs);
+            let pos = params.text_document_position.position;
+            let edits = spice_netlist_ls::rename::rename_edits(
+                &text,
+                pos.line as usize,
+                pos.character as usize,
+                &params.new_name,
+            )
+            .map(|edits| {
+                let changes: HashMap<Uri, Vec<TextEdit>> = HashMap::from([(
+                    uri.clone(),
+                    edits
+                        .into_iter()
+                        .map(|e| TextEdit {
+                            range: Range::new(
+                                Position::new(e.line as u32, e.start_col as u32),
+                                Position::new(e.line as u32, e.end_col as u32),
+                            ),
+                            new_text: e.text,
+                        })
+                        .collect(),
+                )]);
+                WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }
+            });
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(edits)?),
+                error: None,
+            };
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/prepareRename" => {
+            let (id, params): (RequestId, TextDocumentPositionParams) =
+                (req.id, serde_json::from_value(req.params)?);
+            let uri = params.text_document.uri;
+            let text = text_for(&uri, docs);
+            let range = spice_netlist_ls::rename::prepare_rename(
+                &text,
+                params.position.line as usize,
+                params.position.character as usize,
+            )
+            .map(|(line, start, end)| {
+                Range::new(
+                    Position::new(line as u32, start as u32),
+                    Position::new(line as u32, end as u32),
+                )
+            });
+            let resp = Response {
+                id,
+                result: Some(serde_json::to_value(range)?),
                 error: None,
             };
             connection.sender.send(Message::Response(resp))?;

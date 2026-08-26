@@ -107,6 +107,7 @@ require("lspconfig").spicefmt.setup({
 * **Format on save** — via `textDocument/formatting` (included in `after/ftplugin`; remove autocmd for manual).
 * **Diagnostics** — undefined subckt, arity, floating nodes, orphan `+` continuations, `.ends` name mismatch, etc. (same as `spicefmt --lint`).
 * **Go-to-definition** — `gd` on an `X` line jumps to its `.subckt` (follows `.include`/`.lib` transitively).
+* **Rename** — `F2` on a net (instance nodes, `.subckt` ports, `X` pins) or param key (`key=value`, `.param` definitions) renames every occurrence in the file; model/instance names and values are not renameable (`src/rename.rs`).
 * **Semantic highlighting** — nets (`variable`), subckt names (`type`), instance names (`function`), param keys (`property`) etc via `semanticTokensProvider` (`src/semantic_tokens.rs:40`). Dialect-aware (Spectre `(a b)` parens `src/dialect.rs:82`, `+` continuations `src/parser.rs:84`). No tree-sitter grammar needed. See [Syntax highlighting](#syntax-highlighting) for offline regex fallback.
 
 ### 5. Verify — prove nets are colored
@@ -355,6 +356,7 @@ Add a dialect: implement `Dialect`, register in `dialect_from_str`, no parser re
 - [x] Formatter (idempotent, generic params, all four dialects)
 - [x] Dialect auto-detection + config-file overrides
 - [x] LSP formatting, go-to-definition (`X` instantiation → `.subckt`, follows `.include`/`.inc`/`.lib` transitively), diagnostics
+- [x] LSP rename (`F2`) for nets (nodes, `.subckt` ports, `X` pins) and param keys, single-file
 - [x] Linter (undefined subckt, arity, floating nodes, duplicate instances, unterminated subckt, `.ends` name mismatch, stray `.ends`, node case-collision, orphan continuation) — LSP diagnostics + `spicefmt --lint`
   - ngspice `.control`/`.endc` interiors are command language, not netlist cards: no instance/node analysis inside
   - nodes referenced by `.measure`/`.meas`, `.probe`, `.print`, `.plot`, `save`, or `v(...)` in a `let`/`meas` are *observed* and never reported floating

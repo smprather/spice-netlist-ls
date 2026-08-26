@@ -7,6 +7,7 @@ mod fx;
 pub mod ir;
 pub mod linter;
 pub mod parser;
+pub mod rename;
 pub mod segments;
 pub mod semantic_tokens;
 

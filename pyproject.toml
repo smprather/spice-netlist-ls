@@ -1,6 +1,6 @@
 [project]
 name = "spice-netlist-ls"
-version = "0.5.1"
+version = "0.6.0"
 description = "Python wrapper exposing the Rust spicefmt formatter and SPICE netlist language server"
 readme = "README.md"
 authors = [{ name = "Myles Prather", email = "smprather@gmail.com" }]

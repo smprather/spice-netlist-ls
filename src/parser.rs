@@ -299,7 +299,7 @@ pub fn parse_logical_line<'a>(line: &'a str, dialect: &dyn Dialect) -> Stmt<'a> 
 }
 
 /// Byte offset where the inline comment starts, if the line has one.
-fn inline_comment_start(line: &str, dialect: &dyn Dialect) -> Option<usize> {
+pub(crate) fn inline_comment_start(line: &str, dialect: &dyn Dialect) -> Option<usize> {
     let delim = dialect.inline_comment_delim()?;
     // SIMD fast reject: a line without the delimiter byte can never match
     // (`str::contains(char)` lowers to memchr).
@@ -655,7 +655,7 @@ fn split_args_params<'a>(tokens: Vec<&'a str>) -> (Vec<Cow<'a, str>>, Vec<Param<
 
 /// Whitespace-split tokens as borrowed slices; quoted spans keep whitespace
 /// and their surrounding quotes intact. No per-token allocation.
-fn tokenize(s: &str) -> Vec<&str> {
+pub(crate) fn tokenize(s: &str) -> Vec<&str> {
     // Fast path: ASCII-only, quote-free lines need no quote tracking —
     // `split_ascii_whitespace` is exact there (Unicode whitespace and quotes
     // are both non-ASCII-or-quote, so the checks are exhaustive).
@@ -687,7 +687,7 @@ fn tokenize(s: &str) -> Vec<&str> {
     out
 }
 
-fn element_node_count(etype: char) -> Option<usize> {
+pub(crate) fn element_node_count(etype: char) -> Option<usize> {
     match etype {
         'M' => Some(4),
         'Q' => Some(3),
@@ -711,7 +711,7 @@ fn element_node_count(etype: char) -> Option<usize> {
     }
 }
 
-fn find_param_start(tokens: &[&str]) -> Option<usize> {
+pub(crate) fn find_param_start(tokens: &[&str]) -> Option<usize> {
     for i in 0..tokens.len() {
         let tok = tokens[i];
         if tok.contains('=') && tok != "=" {
